@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>23</SupportedOSPlatformVersion>
+    <ApplicationId>io.github.nerodark.yul_landing</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayName>YUL Landing</ApplicationDisplayName>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="index.html" />
+    <AndroidResource Include="Resources\drawable\icon.png" />
+  </ItemGroup>
+  <Target Name="_RenameApk" AfterTargets="Build">
+    <PropertyGroup>
+      <_ApkOrig>$(OutDir)$(_AndroidPackage)-Signed.apk</_ApkOrig>
+      <_ApkClean>$(OutDir)$(AssemblyName)-Signed.apk</_ApkClean>
+    </PropertyGroup>
+    <Delete Files="$(_ApkClean)" Condition="Exists('$(_ApkClean)')" />
+    <Copy SourceFiles="$(_ApkOrig)" DestinationFiles="$(_ApkClean)" Condition="Exists('$(_ApkOrig)')" />
+    <Delete Files="$(_ApkOrig)" Condition="Exists('$(_ApkOrig)') And '$(_ApkOrig)' != '$(_ApkClean)'" />
+  </Target>
+</Project>
