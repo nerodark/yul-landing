@@ -7,15 +7,17 @@
     <ApplicationVersion>1</ApplicationVersion>
     <ApplicationDisplayName>YUL Landing</ApplicationDisplayName>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="index.html" />
     <AndroidResource Include="Resources\drawable\icon.png" />
+    <PackageReference Include="Xamarin.AndroidX.SwipeRefreshLayout" Version="1.1.0.*" />
   </ItemGroup>
   <Target Name="_RenameApk" AfterTargets="Build">
     <PropertyGroup>
       <_ApkOrig>$(OutDir)$(_AndroidPackage)-Signed.apk</_ApkOrig>
-      <_ApkClean>$(OutDir)$(AssemblyName)-Signed.apk</_ApkClean>
+      <_ApkClean>$(OutDir)yul-landing.apk</_ApkClean>
     </PropertyGroup>
     <Delete Files="$(_ApkClean)" Condition="Exists('$(_ApkClean)')" />
     <Copy SourceFiles="$(_ApkOrig)" DestinationFiles="$(_ApkClean)" Condition="Exists('$(_ApkOrig)')" />

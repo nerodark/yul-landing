@@ -6,11 +6,18 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using AndroidX.SwipeRefreshLayout.Widget;
 using Android.App;
+using Android.Content;
 using Android.Content.PM;
+using Android.Graphics;
+using Android.Graphics.Drawables;
 using Android.OS;
 using Android.Runtime;
+using Java.Interop;
 using Android.Webkit;
+using Android.Views;
+using Android.Widget;
 using ApplicationAttribute = Android.App.ApplicationAttribute;
 
 namespace YulLanding;
@@ -38,8 +45,53 @@ public class MainActivity : Activity
         var web = new WebView(this);
         web.Settings.JavaScriptEnabled = true;
         web.Settings.DomStorageEnabled = true;
-        SetContentView(web);
+        web.Settings.CacheMode = CacheModes.NoCache;
+
+        var swipe = new SwipeRefreshLayout(this)
+        {
+            Background = new ColorDrawable(Color.ParseColor("#1B2844"))
+        };
+        swipe.SetColorSchemeColors(Color.ParseColor("#4FC3F7"));
+        swipe.AddView(web, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+
+        var pageClient = new PageClient();
+        web.SetWebViewClient(pageClient);
+
+        swipe.SetOnRefreshListener(new RefreshListener(() =>
+        {
+            web.ClearCache(true);
+            web.LoadUrl(server.Url.ToString());
+        }));
+        pageClient.PageFinished += () =>
+        {
+            unsafe
+            {
+                fixed (JniArgumentValue* args = stackalloc JniArgumentValue[] { new JniArgumentValue(false) })
+                    swipe.JniPeerMembers.InstanceMethods.InvokeVirtualVoidMethod("setRefreshing.(Z)V", swipe, args);
+            }
+        };
+
+        SetContentView(swipe);
         web.LoadUrl(server.Url.ToString());
+    }
+}
+
+class RefreshListener : Java.Lang.Object, SwipeRefreshLayout.IOnRefreshListener
+{
+    readonly Action Action;
+    public RefreshListener(Action action) => Action = action;
+    public void OnRefresh() => Action();
+}
+
+class PageClient : WebViewClient
+{
+    public Action? PageFinished;
+
+    public override void OnPageFinished(WebView? view, string? url)
+    {
+        base.OnPageFinished(view, url);
+        PageFinished?.Invoke();
     }
 }
 

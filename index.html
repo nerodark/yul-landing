@@ -163,7 +163,7 @@
   }
   button { cursor: pointer; }
   button:hover { border-color: var(--dim); }
-  select:focus-visible, button:focus-visible { outline: 2px solid var(--taxi); outline-offset: 2px; }
+  select:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--taxi); outline-offset: 2px; }
   #status { margin-left: auto; font-variant-numeric: tabular-nums; }
 
   #notice { display: none; margin: 18px 0 0; padding: 10px 14px; border-left: 3px solid var(--alert); background: var(--panel); }
@@ -357,6 +357,9 @@
         <option value="120">2 min</option>
       </select>
     </label>
+    <label><span data-i18n="ctl_auto">Auto-refresh</span>
+      <input type="checkbox" id="auto">
+    </label>
     <label><span data-i18n="ctl_radius">Search radius</span>
       <select id="radius">
         <option value="15">15 km</option>
@@ -406,8 +409,8 @@
       th_hour: 'Hour', th_cond: 'Conditions', th_temp: 'Temp (°C)', th_wind: 'Wind (° / kt)',
       th_gusts: 'Gusts (kt)', th_precip: 'Precip.', th_vis: 'Vis. (km)', th_rwy: 'Runway',
       title_precip: 'Chance of precipitation', title_vis: 'Visibility', title_rwy: 'Runway favoured by the forecast wind',
-      ctl_refresh: 'Refresh every', ctl_radius: 'Search radius', btn_now: 'Refresh now',
-      fine: "Live positions come from the OpenSky Network's free ADS-B feed. Anonymous access allows roughly 400 requests a day, so a longer refresh keeps the page working all day. Parallel runways (06L/06R and 24L/24R) share a heading and are reported together. Updates pause while this tab is hidden. All weather is for the airport itself (CYUL observation and a forecast for its coordinates), never for the visitor's location, and every time shown is Montréal time. The forecast comes from Open-Meteo model data and refreshes every 15 minutes. Forecast wind only shows which runway it would favour; the runway actually used is chosen by air traffic control.",
+      ctl_refresh: 'Refresh every', ctl_radius: 'Search radius', ctl_auto: 'Auto-refresh', btn_now: 'Refresh now',
+      fine: "Live positions come from the OpenSky Network's free ADS-B feed. Anonymous access allows roughly 400 requests a day, so a longer refresh keeps the page working all day. Parallel runways (06L/06R and 24L/24R) share a heading and are reported together. Updates pause while this tab is hidden. All weather is for the airport itself (CYUL observation and a forecast for its coordinates), never for the visitor's location, and every time shown is Montréal time. The forecast comes from Open-Meteo model data and, while auto-refresh is on, refreshes every 15 minutes. Forecast wind only shows which runway it would favour; the runway actually used is chosen by air traffic control.",
       diagram_aria: 'Runway layout with the active runway highlighted',
 
       waiting: 'Waiting for first update',
@@ -472,8 +475,8 @@
       th_hour: 'Heure', th_cond: 'Conditions', th_temp: 'Temp. (°C)', th_wind: 'Vent (° / kt)',
       th_gusts: 'Rafales (kt)', th_precip: 'Précip.', th_vis: 'Vis. (km)', th_rwy: 'Piste',
       title_precip: 'Probabilité de précipitations', title_vis: 'Visibilité', title_rwy: 'Piste favorisée par le vent prévu',
-      ctl_refresh: 'Actualiser toutes les', ctl_radius: 'Rayon de recherche', btn_now: 'Actualiser maintenant',
-      fine: "Les positions en direct proviennent du flux ADS-B gratuit du réseau OpenSky. L'accès anonyme permet environ 400 requêtes par jour : un intervalle plus long permet à la page de fonctionner toute la journée. Les pistes parallèles (06L/06R et 24L/24R) ont le même cap et sont regroupées. Les mises à jour sont suspendues lorsque cet onglet est masqué. Toute la météo concerne l'aéroport lui-même (observation CYUL et prévisions pour ses coordonnées), jamais l'emplacement du visiteur, et toutes les heures affichées sont l'heure de Montréal. Les prévisions proviennent des données de modèle d'Open-Meteo et sont actualisées toutes les 15 minutes. Le vent prévu indique seulement la piste qu'il favoriserait; la piste réellement utilisée est choisie par le contrôle de la circulation aérienne.",
+      ctl_refresh: 'Actualiser toutes les', ctl_radius: 'Rayon de recherche', ctl_auto: 'Auto-actualisation', btn_now: 'Actualiser maintenant',
+      fine: "Les positions en direct proviennent du flux ADS-B gratuit du réseau OpenSky. L'accès anonyme permet environ 400 requêtes par jour : un intervalle plus long permet à la page de fonctionner toute la journée. Les pistes parallèles (06L/06R et 24L/24R) ont le même cap et sont regroupées. Les mises à jour sont suspendues lorsque cet onglet est masqué. Toute la météo concerne l'aéroport lui-même (observation CYUL et prévisions pour ses coordonnées), jamais l'emplacement du visiteur, et toutes les heures affichées sont l'heure de Montréal. Les prévisions proviennent des données de modèle d'Open-Meteo et, lorsque l'auto-actualisation est activée, sont actualisées toutes les 15 minutes. Le vent prévu indique seulement la piste qu'il favoriserait; la piste réellement utilisée est choisie par le contrôle de la circulation aérienne.",
       diagram_aria: 'Schéma des pistes avec la piste en service en surbrillance',
 
       waiting: 'En attente de la première mise à jour',
@@ -742,7 +745,6 @@
     renderArrivals();
     renderWind();
     renderForecast();
-    renderStatus();
   }
 
   function renderHeader() {
@@ -1042,11 +1044,13 @@
   let nextAt = Date.now();
   let intervalSec = 30;
   let radiusKm = 25;
+  let autoRefresh = false;
 
   async function refresh() {
     if (busy) return;
     busy = true;
     $('now').disabled = true;
+    loadForecast();
     renderStatus();
 
     const [arrRes, metRes] = await Promise.allSettled([fetchArrivals(radiusKm), fetchMetar()]);
@@ -1073,12 +1077,14 @@
 
   function renderStatus() {
     const el = $('status');
-    if (busy) el.textContent = t('st_updating');
+    if (!autoRefresh) el.textContent = '';
+    else if (busy) el.textContent = t('st_updating');
     else if (document.hidden) el.textContent = t('st_paused');
     else el.textContent = t('st_next', { s: secondsLeft() });
   }
 
   function tick() {
+    if (!autoRefresh) return;
     if (!document.hidden && !fcBusy && Date.now() - fcAt > FC_EVERY_MS) loadForecast();
     renderStatus();
     if (!busy && !document.hidden && secondsLeft() === 0) refresh();
@@ -1090,13 +1096,15 @@
       const s = JSON.parse(localStorage.getItem('yulLanding') || '{}');
       if (s.interval) $('interval').value = s.interval;
       if (s.radius) $('radius').value = s.radius;
+      if (s.auto !== undefined) autoRefresh = !!s.auto;
     } catch (e) { /* storage unavailable */ }
+    $('auto').checked = autoRefresh;
     intervalSec = parseInt($('interval').value, 10);
     radiusKm = parseInt($('radius').value, 10);
   }
   function saveSettings() {
     try {
-      localStorage.setItem('yulLanding', JSON.stringify({ interval: $('interval').value, radius: $('radius').value }));
+      localStorage.setItem('yulLanding', JSON.stringify({ interval: $('interval').value, radius: $('radius').value, auto: $('auto').checked }));
     } catch (e) { /* ignore */ }
   }
 
@@ -1111,6 +1119,12 @@
     nextAt = Date.now() + intervalSec * 1000;
     saveSettings();
   });
+  $('auto').addEventListener('change', () => {
+    autoRefresh = $('auto').checked;
+    if (autoRefresh) nextAt = Date.now() + intervalSec * 1000;
+    saveSettings();
+    renderStatus();
+  });
   $('radius').addEventListener('change', () => {
     radiusKm = parseInt($('radius').value, 10);
     saveSettings();
@@ -1123,7 +1137,6 @@
   loadSettings();
   renderAll();
   refresh();
-  loadForecast();
   setInterval(tick, 500);
 })();
 </script>
