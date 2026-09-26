@@ -15,6 +15,15 @@
 #
 # Requires the .NET 10 SDK on PATH. If a device/emulator is connected, the APK
 # is installed and launched; otherwise the APK path is printed.
+#
+# Optional: .\update.ps1 -Device <name> to target a specific device when
+# several are connected. Accepts an AVD name (tablet / phone) or a serial
+# from `adb devices`.
+#
+# By default the script only deploys the newest existing APK. Pass -Build to
+# build first:   .\update.ps1 -Build
+
+param([string]$Device = "", [switch]$Build)
 
 $ErrorActionPreference = "Stop"
 
@@ -100,19 +109,24 @@ if (-not (Test-Path (Join-Path $sdk "platform-tools\adb.exe"))) {
     & $sdkmanager --sdk_root=$sdk "platform-tools" "build-tools;36.0.0" "platforms;android-35" "platforms;android-36" | Out-Null
 }
 
-# 4. Build (toolchain env vars scoped to this process)
+# 4. Build (only when -Build is passed; toolchain env vars scoped to this process)
 $env:JAVA_HOME    = $jdk
 $env:ANDROID_HOME = $sdk
-Write-Host "==> Building"
-dotnet build $csproj.FullName -c Release --no-incremental `
-    -p:JavaSdkDirectory=$jdk -p:AndroidSdkDirectory=$sdk |
-    Select-String "error|Build succeeded|Build FAILED" | ForEach-Object { Write-Host "    $($_.Line)" }
+if ($Build) {
+    Write-Host "==> Building"
+    dotnet build $csproj.FullName -c Release --no-incremental `
+        -p:JavaSdkDirectory=$jdk -p:AndroidSdkDirectory=$sdk |
+        Select-String "error|Build succeeded|Build FAILED" | ForEach-Object { Write-Host "    $($_.Line)" }
+}
 # Locate the APK dynamically (name depends on the csproj/assembly name).
 $apk = Get-ChildItem -LiteralPath $project -Recurse -Filter *.apk -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match '\\Release\\' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
-if (-not $apk -or $apk.LastWriteTime -lt (Get-Date).AddMinutes(-1)) {
+if (-not $apk) {
+    throw "No APK found - run .\update.ps1 -Build first"
+}
+if ($Build -and $apk.LastWriteTime -lt (Get-Date).AddMinutes(-1)) {
     throw "Build did not produce a fresh APK"
 }
 $apk = $apk.FullName
@@ -129,7 +143,23 @@ if (-not $devices) {
     Write-Host ("    {0}" -f $apk)
     return
 }
-$dev = @($devices)[0]
+if ($Device) {
+    if (@($devices) -contains $Device) {
+        $dev = $Device
+    } else {
+        # Treat it as an AVD name (e.g. 'tablet'/'phone') and find the serial
+        $dev = ""
+        $connected = @()
+        foreach ($s in $devices) {
+            $name = (& $adb -s $s emu avd name 2>$null | Select-Object -First 1 | ForEach-Object { ($_ -split "\s+")[0] })
+            if ($name) { $connected += "$name ($s)" } else { $connected += $s }
+            if ($name -eq $Device) { $dev = $s; break }
+        }
+        if (-not $dev) { throw "Device '$Device' not found. Connected: $($connected -join ', ')" }
+    }
+} else {
+    $dev = @($devices)[0]
+}
 Write-Host ("==> Installing on {0}" -f $dev)
 & $adb -s $dev install -r $apk | ForEach-Object { Write-Host "    $_" }
 
