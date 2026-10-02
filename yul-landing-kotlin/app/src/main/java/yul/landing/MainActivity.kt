@@ -1,3 +1,5 @@
+@file:Suppress("SpellCheckingInspection")
+
 package yul.landing
 
 import android.app.Application
