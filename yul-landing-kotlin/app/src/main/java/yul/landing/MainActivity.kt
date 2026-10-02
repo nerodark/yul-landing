@@ -237,7 +237,7 @@ internal class YulViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun setLang(v: String) { prefs.edit { putString("lang", v) }; _state.value = _state.value.copy(lang = v) }
     fun setInterval(v: Int) { prefs.edit { putInt("interval", v) }; _state.value = _state.value.copy(intervalSec = v, nextAt = System.currentTimeMillis() + v * 1000L) }
-    fun setRadius(v: Int) { prefs.edit { putInt("radius", v) }; refresh() }
+    fun setRadius(v: Int) { prefs.edit { putInt("radius", v) }; _state.value = _state.value.copy(radiusKm = v); refresh() }
     fun setAuto(v: Boolean) { prefs.edit { putBoolean("auto", v) }; _state.value = _state.value.copy(autoRefresh = v, nextAt = System.currentTimeMillis() + _state.value.intervalSec * 1000L) }
 
     fun refresh() {
