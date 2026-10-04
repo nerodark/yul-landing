@@ -64,19 +64,42 @@ private val SignFg = Color(0xFFFFC933)
 
 data class Runway(val name: String, val id: String, val pair: String, val heading: Double)
 private val RUNWAYS = listOf(
-    Runway("06 (06L/06R)", "06", "06L / 06R", 46.0),
-    Runway("24 (24L/24R)", "24", "24L / 24R", 226.0)
+    Runway("06 (06L/06R)", "06", "06L / 06R", 43.0),
+    Runway("24 (24L/24R)", "24", "24L / 24R", 223.0)
 )
 private const val AIRPORT_LAT = 45.4706
 private const val AIRPORT_LON = -73.7408
 private const val AIRPORT_ELEV_M = 36.0
-private const val MAX_AGL_M = 1300.0
+private const val MAX_AGL_M = 1600.0   // ~5,250 ft: covers level intercepts out to the edge of the search area
 private const val HDG_TOL = 15.0
 private const val CL_TOL = 25.0
+// Lane geometry from YUL threshold coordinates, measured in the 06 frame
+// (positive = southeast / right of the 06 direction). The midline between the two
+// parallel runways sits ~0.15 km southeast of the airport reference point, and each
+// runway centerline is ~0.82 km either side of that midline.
+private const val MIDLINE_BIAS_KM = 0.15
+private const val LANE_HALF_SPACING_KM = 0.82
+// A plane only gets L/R once it is within this distance of a runway centerline
+// (i.e. established on final, not still being vectored).
+private const val LANE_TOL_KM = 0.4
+// Only call L/R once the plane is this close and this low; farther out it may
+// still be being vectored onto final, so we show just the runway number.
+private const val LANE_MAX_KM = 10.0
+// Fixed search area. Planes are usually level around 3,000-5,000 ft when they join the
+// approach 20-25 km out, so this reaches the start of final.
+private const val SEARCH_RADIUS_KM = 25
+private const val LANE_MAX_AGL_M = 700.0
+// --- GLIDESLOPE (optional: delete these, the filter in arrivals() and ApproachProfile to remove) ---
+private const val GS_M_PER_KM = 52.4          // 3 degree slope: tan(3 deg) * 1000 m
+private const val GS_FT_PER_KM = 172.0        // same slope in feet per km
+private const val GS_UPPER_FACTOR = 2.0       // above 2x the slope height = not on final
+private const val GS_LOWER_FACTOR = 0.5       // below 0.5x = outside the "normal" band (dimmed in the chart)
+private const val GS_FLOOR_M = 100.0          // slack so planes near the runway are never dropped
 
 data class Aircraft(
     val callsign: String, val runway: Runway, val heading: Int,
-    val altFt: Int, val distKm: Double, val speedKt: Int?
+    val altFt: Int, val distKm: Double, val speedKt: Int?,
+    val side: String? // "L" or "R"; null while too far out / too high to tell
 )
 data class Metar(val dir: Int?, val speed: Int?, val raw: String, val obsMs: Long?)
 data class ForecastRow(
@@ -97,7 +120,6 @@ data class UiState(
     val forecastError: Boolean = false,
     val forecastUpdated: Long? = null,
     val intervalSec: Int = 30,
-    val radiusKm: Int = 25,
     val autoRefresh: Boolean = false,
     val busy: Boolean = false,
     val nextAt: Long = System.currentTimeMillis(),
@@ -123,10 +145,10 @@ private class YulRepository {
         val dLat = radiusKm / 111.0
         val dLon = radiusKm / (111.0 * cos(Math.toRadians(AIRPORT_LAT)))
         val url = "https://opensky-network.org/api/states/all?" +
-            "lamin=${"%.4f".format(Locale.US, AIRPORT_LAT - dLat)}&" +
-            "lamax=${"%.4f".format(Locale.US, AIRPORT_LAT + dLat)}&" +
-            "lomin=${"%.4f".format(Locale.US, AIRPORT_LON - dLon)}&" +
-            "lomax=${"%.4f".format(Locale.US, AIRPORT_LON + dLon)}"
+                "lamin=${"%.4f".format(Locale.US, AIRPORT_LAT - dLat)}&" +
+                "lamax=${"%.4f".format(Locale.US, AIRPORT_LAT + dLat)}&" +
+                "lomin=${"%.4f".format(Locale.US, AIRPORT_LON - dLon)}&" +
+                "lomax=${"%.4f".format(Locale.US, AIRPORT_LON + dLon)}"
         val root = JSONObject(get(url))
         val states = root.optJSONArray("states") ?: JSONArray()
         val out = mutableListOf<Aircraft>()
@@ -140,16 +162,26 @@ private class YulRepository {
             val agl = alt - AIRPORT_ELEV_M
             if (agl > MAX_AGL_M) continue
             val vr = s.optDoubleOrNull(11)
-            if (vr != null && vr > -0.5) continue
+            // Skip climbing traffic only. Planes are often level while capturing the
+            // glideslope 15-25 km out, so level flight must still count as on final.
+            if (vr != null && vr > 1.0) continue
             val dist = distanceKm(lat, lon)
             if (dist > radiusKm) continue
+            // GLIDESLOPE CHECK (optional): skip planes far above a 3 degree path to the runway
+            if (agl > GS_UPPER_FACTOR * GS_M_PER_KM * dist + GS_FLOOR_M) continue
             val rwy = closestRunway(track)
             if (angleDiff(track, rwy.heading) > HDG_TOL) continue
             val brg = bearingDeg(lat, lon)
             if (angleDiff(brg, (rwy.heading + 180) % 360) > CL_TOL) continue
             val call = s.optString(1).trim().ifEmpty { s.optString(0, "?") }
+            // Cross-track from the midline, positive = right of the landing direction.
+            // The midline offset is defined in the 06 frame, so it flips sign for 24.
+            val xt = crossTrackKm(lat, lon, rwy.heading) - (if (rwy.id == "06") MIDLINE_BIAS_KM else -MIDLINE_BIAS_KM)
+            val established = abs(abs(xt) - LANE_HALF_SPACING_KM) <= LANE_TOL_KM
+            val side = if (dist > LANE_MAX_KM || agl > LANE_MAX_AGL_M || !established) null
+            else if (xt >= 0) "R" else "L"
             out += Aircraft(call, rwy, track.roundToInt(), (agl * 3.28084).roundToInt(), dist,
-                s.optDoubleOrNull(9)?.let { (it * 1.94384).roundToInt() })
+                s.optDoubleOrNull(9)?.let { (it * 1.94384).roundToInt() }, side)
         }
         out.sortedBy { it.distKm }
     }
@@ -164,8 +196,8 @@ private class YulRepository {
 
     suspend fun forecast(): List<ForecastRow> = withContext(Dispatchers.IO) {
         val url = "https://api.open-meteo.com/v1/forecast?latitude=$AIRPORT_LAT&longitude=$AIRPORT_LON" +
-            "&hourly=is_day,temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility" +
-            "&wind_speed_unit=kn&timezone=America%2FToronto&forecast_days=2"
+                "&hourly=is_day,temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility" +
+                "&wind_speed_unit=kn&timezone=America%2FToronto&forecast_days=2"
         val root = JSONObject(get(url))
         val h = root.getJSONObject("hourly")
         val times = h.getJSONArray("time")
@@ -211,6 +243,10 @@ private fun bearingDeg(lat2: Double, lon2: Double): Double {
     val x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)
     return (Math.toDegrees(atan2(y, x)) + 360) % 360
 }
+// Signed distance (km) to the RIGHT of a line through the airport reference point
+// pointing along `heading`. Positive = right (R), negative = left (L).
+private fun crossTrackKm(lat: Double, lon: Double, heading: Double): Double =
+    distanceKm(lat, lon) * sin(rad(bearingDeg(lat, lon) - heading))
 private fun closestRunway(track: Double) = RUNWAYS.minBy { angleDiff(track, it.heading) }
 private fun favouredRunway(dir: Double?, speed: Double?): Runway? =
     if (dir == null || speed == null || speed < 3) null else RUNWAYS.minBy { angleDiff(dir, it.heading) }
@@ -220,7 +256,7 @@ internal class YulViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("yulLanding", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(UiState(
         lang = prefs.getString("lang", null) ?: if (Locale.getDefault().language == "fr") "fr" else "en",
-        intervalSec = prefs.getInt("interval", 30), radiusKm = prefs.getInt("radius", 25),
+        intervalSec = prefs.getInt("interval", 30),
         autoRefresh = prefs.getBoolean("auto", false)
     ))
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -229,7 +265,7 @@ internal class YulViewModel(app: Application) : AndroidViewModel(app) {
     init { refresh(); ticker() }
     private fun ticker() = viewModelScope.launch {
         while (isActive) {
-                delay(Duration.parse("0.5s"))
+            delay(Duration.parse("0.5s"))
             val s = _state.value
             if (s.autoRefresh && !s.busy && System.currentTimeMillis() >= s.nextAt) refresh()
             else if (s.autoRefresh) _state.value = s.copy(status = "next:${max(0, ceil((s.nextAt - System.currentTimeMillis()) / 1000.0).toInt())}")
@@ -237,15 +273,13 @@ internal class YulViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun setLang(v: String) { prefs.edit { putString("lang", v) }; _state.value = _state.value.copy(lang = v) }
     fun setInterval(v: Int) { prefs.edit { putInt("interval", v) }; _state.value = _state.value.copy(intervalSec = v, nextAt = System.currentTimeMillis() + v * 1000L) }
-    fun setRadius(v: Int) { prefs.edit { putInt("radius", v) }; _state.value = _state.value.copy(radiusKm = v); refresh() }
     fun setAuto(v: Boolean) { prefs.edit { putBoolean("auto", v) }; _state.value = _state.value.copy(autoRefresh = v, nextAt = System.currentTimeMillis() + _state.value.intervalSec * 1000L) }
 
     fun refresh() {
         if (_state.value.busy) return
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = true, trafficError = null)
-            val radius = _state.value.radiusKm
-            val arrivals = runCatching { repo.arrivals(radius) }
+            val arrivals = runCatching { repo.arrivals(SEARCH_RADIUS_KM) }
             val metar = runCatching { repo.metar() }
             val needForecast = System.currentTimeMillis() - forecastAt > 15 * 60 * 1000
             val forecast = if (needForecast || _state.value.forecast == null) runCatching { repo.forecast() } else null
@@ -277,6 +311,8 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "forecast" to "Airport forecast, next 12 hours", "waiting" to "Waiting for first update", "checking" to "Checking",
         "updated" to "Updated {time} (Montréal time)",
         "unavailable" to "Unavailable", "no_arrivals" to "No arrivals", "in_use" to "Runway in use", "favours" to "Wind favours",
+        "lane_pending" to "Lane pending", "undetermined" to "Not determined", "profile" to "Approach profile", "lane_known" to "Lane known", "runway_only" to "Runway only",
+        "profile_note" to "Distance in km, height in ft (heights exaggerated). Dashed line: 3° glideslope; shaded band: range counted as on final. Filled dot: lane known; ring: runway only.",
         "note_none_wind" to "No aircraft on final right now. The wind favours runway {id}, which would mean landing toward the {dir}.",
         "note_none" to "No aircraft on final right now. This can be a quiet spell or a gap in ADS-B coverage.",
         "note_mixed" to "Mixed runway usage: {list}.",
@@ -310,6 +346,8 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "waiting" to "En attente de la première mise à jour", "checking" to "Vérification",
         "updated" to "Mis à jour à {time} (heure de Montréal)",
         "unavailable" to "Indisponible", "no_arrivals" to "Aucune arrivée", "in_use" to "Piste en service", "favours" to "Vent favorable",
+        "lane_pending" to "Côté à confirmer", "undetermined" to "Indéterminée", "profile" to "Profil d'approche", "lane_known" to "Côté connu", "runway_only" to "Piste seulement",
+        "profile_note" to "Distance en km, hauteur en ft (hauteurs exagérées). Ligne pointillée : pente de 3°; zone ombrée : plage comptée comme en finale. Point plein : côté connu; anneau : piste seulement.",
         "note_none_wind" to "Aucun avion en finale pour le moment. Le vent favorise la piste {id}, ce qui signifierait un atterrissage vers le {dir}.",
         "note_none" to "Aucun avion en finale pour le moment. Il peut s'agir d'une période calme ou d'une lacune de couverture ADS-B.",
         "note_mixed" to "Utilisation mixte des pistes : {list}.",
@@ -418,62 +456,77 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
     val lang = s.lang
     val listState = rememberLazyListState()
     BoxWithConstraints {
-    val wide = maxWidth >= 600.dp
-    PullToRefreshBox(isRefreshing = s.busy, modifier = Modifier.fillMaxSize(), onRefresh = { vm.refresh() }) {
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 18.dp, 16.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
-        item {
-            Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.weight(1f)) {
-                    Text("Montréal-Trudeau (YUL)", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                    Text(t(lang, "sub"), color = Dim, fontSize = 14.sp)
-                }
-                Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, Line)) {
-                    LanguageButton("EN", lang == "en") { vm.setLang("en") }
-                    LanguageButton("FR", lang == "fr") { vm.setLang("fr") }
-                }
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), color = Dim, fontSize = 13.sp)
-        }
-        item { if (s.trafficError != null) Notice(t(lang, if (s.trafficError == "rate") "err_rate" else "err_network")) }
-        item { Hero(s, lang) }
-        item { SectionTitle(t(lang, "arrivals")) }
-        if (s.arrivals == null || s.trafficError != null) item { EmptyText(if (s.trafficError != null) t(lang, "trafficUnavailable") else t(lang, "loading")) }
-        else if (s.arrivals.isEmpty()) item { EmptyText(t(lang, "noneDetected")) }
-        else items(s.arrivals, key = { it.callsign + it.distKm }) { AircraftCard(it, lang) }
-        item { SectionTitle(t(lang, "wind")) }
-        item { WindCard(s, lang) }
-        item { SectionTitle(t(lang, "forecast")) }
-        if (s.forecastError) item { EmptyText(t(lang, "fcUnavailable")) }
-        else if (s.forecast == null) item { EmptyText(t(lang, "loading")) }
-        else {
-            val rows = s.forecast
-            item { Text(forecastSummary(lang, rows)) }
-            var prevFav: String? = null
-            val cards = rows.map { r ->
-                val switched = r.fav != null && prevFav != null && r.fav.id != prevFav
-                if (r.fav != null) prevFav = r.fav.id
-                r to switched
-            }
-            if (wide) cards.chunked(2).forEach { pair ->
+        val wide = maxWidth >= 600.dp
+        PullToRefreshBox(isRefreshing = s.busy, modifier = Modifier.fillMaxSize(), onRefresh = { vm.refresh() }) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 18.dp, 16.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        pair.forEach { (r, sw) -> ForecastCard(r, sw, lang, Modifier.weight(1f)) }
+                    Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Montréal-Trudeau (YUL)", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                            Text(t(lang, "sub"), color = Dim, fontSize = 14.sp)
+                        }
+                        Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, Line)) {
+                            LanguageButton("EN", lang == "en") { vm.setLang("en") }
+                            LanguageButton("FR", lang == "fr") { vm.setLang("fr") }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
+                    Spacer(Modifier.height(14.dp))
+                    if (s.trafficError != null) {
+                        Notice(t(lang, if (s.trafficError == "rate") "err_rate" else "err_network"))
+                        Spacer(Modifier.height(14.dp))
+                    }
+                    Hero(s, lang)
+                }
+                item { ApproachProfile(s.arrivals.orEmpty(), lang) }
+                item { SectionTitle(t(lang, "arrivals")) }
+                if (s.arrivals == null || s.trafficError != null) item { EmptyText(if (s.trafficError != null) t(lang, "trafficUnavailable") else t(lang, "loading")) }
+                else if (s.arrivals.isEmpty()) item { EmptyText(t(lang, "noneDetected")) }
+                else items(s.arrivals, key = { it.callsign + it.distKm }) { AircraftCard(it, lang) }
+                item { SectionTitle(t(lang, "wind")) }
+                item { WindCard(s, lang) }
+                item { SectionTitle(t(lang, "forecast")) }
+                if (s.forecastError) item { EmptyText(t(lang, "fcUnavailable")) }
+                else if (s.forecast == null) item { EmptyText(t(lang, "loading")) }
+                else {
+                    val rows = s.forecast
+                    item { Text(forecastSummary(lang, rows)) }
+                    var prevFav: String? = null
+                    val cards = rows.map { r ->
+                        val switched = r.fav != null && prevFav != null && r.fav.id != prevFav
+                        if (r.fav != null) prevFav = r.fav.id
+                        r to switched
+                    }
+                    if (wide) cards.chunked(2).forEach { pair ->
+                        item {
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                pair.forEach { (r, sw) -> ForecastCard(r, sw, lang, Modifier.weight(1f)) }
+                            }
+                        }
+                    } else cards.forEach { (r, sw) -> item { ForecastCard(r, sw, lang) } }
+                    item {
+                        val time = fmtTime(s.forecastUpdated, true, lang)
+                        Text(t(lang, "fc_source", "lat" to "45.4706", "lon" to "-73.7408", "tz" to (time.split(" ").lastOrNull() ?: ""), "time" to time), color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp))
                     }
                 }
-            } else cards.forEach { (r, sw) -> item { ForecastCard(r, sw, lang) } }
-            item {
-                val time = fmtTime(s.forecastUpdated, true, lang)
-                Text(t(lang, "fc_source", "lat" to "45.4706", "lon" to "-73.7408", "tz" to (time.split(" ").lastOrNull() ?: ""), "time" to time), color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp))
+                item { Controls(s, vm, lang) }
+                item { Text(t(lang, "fine"), color = Dim, fontSize = 12.sp) }
             }
         }
-        item { Controls(s, vm, lang) }
-        item { Text(t(lang, "fine"), color = Dim, fontSize = 12.sp) }
-        }
-    }
     }
 }
 
+@Composable private fun UpdatedStamp(text: String, fresh: Boolean) {
+    Row(
+        Modifier.clip(RoundedCornerShape(8.dp)).background(Panel).border(1.dp, if (fresh) Taxi else Line, RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(Modifier.size(9.dp).background(if (fresh) Taxi else Dim, RoundedCornerShape(50)))
+        Text(text, color = PaintColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
 @Composable private fun LanguageButton(text: String, selected: Boolean, onClick: () -> Unit) {
     TextButton(onClick = onClick, colors = ButtonDefaults.textButtonColors(containerColor = if (selected) SignBg else Color.Transparent, contentColor = if (selected) SignFg else Dim), modifier = Modifier.height(40.dp)) { Text(text, fontWeight = FontWeight.Bold) }
 }
@@ -486,6 +539,13 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
     val top = s.arrivals?.groupingBy { it.runway.id }?.eachCount()?.maxByOrNull { it.value }?.key?.let { id -> RUNWAYS.firstOrNull { it.id == id } }
     val active = top ?: fav
     val predicted = top == null
+    // Lanes in use, e.g. ["24L", "24R"], and the ones belonging to the dominant runway
+    // A 3-char entry ("24R") means the lane is known; a 2-char entry ("24") means only the runway is.
+    val lanes = s.arrivals.orEmpty().groupBy { it.runway.id }.flatMap { (id, list) ->
+        val sides = list.mapNotNull { it.side }.distinct().sorted()
+        if (sides.isEmpty()) listOf(id) else sides.map { id + it }
+    }
+    val topLanes = if (top == null) emptyList() else lanes.filter { it.length == 3 && it.startsWith(top.id) }
     val dir = when {
         s.arrivals == null -> t(lang, if (s.trafficError != null) "unavailable" else "checking")
         s.arrivals.isEmpty() -> t(lang, "no_arrivals")
@@ -495,10 +555,11 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
         Text(t(lang, "landing"), color = Dim, fontSize = 14.sp)
         Text(dir, color = if (s.arrivals.isNullOrEmpty()) Dim else PaintColor, fontSize = if (dir.length > 9) 46.sp else 64.sp, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            if (active != null) RunwaySign(active, predicted, lang)
+            RunwaySign(active, predicted, lang, if (predicted) null else topLanes.joinToString(" / ").ifEmpty { null }, pending = !predicted && topLanes.isEmpty())
             RunwayDiagram(
                 active?.id,
                 predicted,
+                lanes.toSet(),
                 Modifier
                     .weight(1f)
                     .aspectRatio(1f)
@@ -521,15 +582,15 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
     }
 }
 
-@Composable private fun RunwaySign(r: Runway, predicted: Boolean, lang: String) {
+@Composable private fun RunwaySign(r: Runway?, predicted: Boolean, lang: String, lanes: String? = null, pending: Boolean = false) {
     Column(Modifier.padding(4.dp).border(3.dp, if (predicted) Line else SignFg, RoundedCornerShape(12.dp)).background(if (predicted) Color.Transparent else SignBg, RoundedCornerShape(12.dp)).padding(horizontal = 20.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(t(lang, if (predicted) "favours" else "in_use"), color = if (predicted) Dim else Color(0xFFE6E1C6), fontSize = 12.sp)
-        Text(r.id, color = if (predicted) PaintColor else SignFg, fontSize = 60.sp, fontWeight = FontWeight.ExtraBold)
-        Text(r.pair, color = if (predicted) Dim else Color(0xFFE6E1C6), fontWeight = FontWeight.SemiBold)
+        Text(t(lang, if (predicted && r != null) "favours" else "in_use"), color = if (predicted) Dim else Color(0xFFE6E1C6), fontSize = 12.sp)
+        Text(r?.id ?: "--", color = if (r == null) Dim else if (predicted) PaintColor else SignFg, fontSize = 60.sp, fontWeight = FontWeight.ExtraBold)
+        Text(lanes ?: (if (pending) t(lang, "lane_pending") else r?.pair ?: t(lang, "undetermined")), color = if (predicted) Dim else Color(0xFFE6E1C6), fontWeight = FontWeight.SemiBold, fontSize = if (lanes != null) 22.sp else 16.sp)
     }
 }
 
-@Composable private fun RunwayDiagram(activeId: String?, predicted: Boolean, modifier: Modifier = Modifier) {
+@Composable private fun RunwayDiagram(activeId: String?, predicted: Boolean, lanes: Set<String>, modifier: Modifier = Modifier) {
     val infiniteTransition = rememberInfiniteTransition(label = "runwayArrows")
     val dashPhase by infiniteTransition.animateFloat(
         initialValue = 18f,
@@ -542,98 +603,110 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
     )
 
     Canvas(modifier) {
-        // Keep the same 244-ish coordinate system as the HTML SVG and scale it
-        // to the actual Compose canvas instead of using tiny fixed pixel values.
         val designSize = 260f
         val scale = min(size.width, size.height) / designSize
         val c = Offset(130f * scale, 130f * scale)
         val len = 140f * scale
         val w = 14f * scale
-        val off = 12f * scale
-        val tagOffset = 38f * scale
+        val off = 20f * scale            // lateral distance of each lane from the midline
         val stroke = max(1f, 1.5f * scale)
+        val diagramHeading = 43f
+        val th = Math.toRadians(diagramHeading.toDouble()).toFloat()
 
-        // Parallel runways: same geometry as the HTML version.
+        // Diagram frame: runways point along heading 43 (the 06 direction), drawn
+        // "up". Local +x is to the RIGHT of the 06 direction, so the +off lane is
+        // 06R (and 24L when landing the other way); the -off lane is 06L / 24R.
+        fun toScreen(lx: Float, ly: Float) = Offset(
+            c.x + lx * cos(th) - ly * sin(th),
+            c.y + lx * sin(th) + ly * cos(th)
+        )
+        fun name06(o: Float) = if (o > 0) "06R" else "06L"
+        fun name24(o: Float) = if (o > 0) "24L" else "24R"
+
+        // The two parallel runways. Only lanes actually in use are highlighted.
         drawContext.canvas.save()
-        drawContext.canvas.rotate(46f, c.x, c.y)
-        run {
-            listOf(-off, off).forEach { parallelOffset ->
-                drawRoundRect(
-                    color = if (activeId != null) lerp(Panel, Taxi, .30f) else Panel,
-                    topLeft = Offset(c.x - w / 2f + parallelOffset, c.y - len / 2f),
-                    size = Size(w, len),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f * scale)
+        drawContext.canvas.rotate(diagramHeading, c.x, c.y)
+        listOf(-off, off).forEach { o ->
+            // Three looks: lane known (solid), runway known but lane pending (soft glow),
+            // and wind-only prediction (dashed).
+            val known = name06(o) in lanes || name24(o) in lanes
+            val pending = !predicted && !known && ("06" in lanes || "24" in lanes)
+            val on = if (predicted) activeId != null else known
+            drawRoundRect(
+                color = if (on) lerp(Panel, Taxi, .30f) else if (pending) lerp(Panel, Taxi, .15f) else Panel,
+                topLeft = Offset(c.x - w / 2f + o, c.y - len / 2f),
+                size = Size(w, len),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f * scale)
+            )
+            drawRoundRect(
+                color = if (on) Taxi else if (pending) Taxi.copy(alpha = .4f) else Line,
+                topLeft = Offset(c.x - w / 2f + o, c.y - len / 2f),
+                size = Size(w, len),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f * scale),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = if (on) 2.5f * scale else stroke,
+                    pathEffect = if (predicted && on) {
+                        PathEffect.dashPathEffect(floatArrayOf(7f * scale, 4f * scale))
+                    } else null
                 )
-                drawRoundRect(
-                    color = if (activeId != null) Taxi else Line,
-                    topLeft = Offset(c.x - w / 2f + parallelOffset, c.y - len / 2f),
-                    size = Size(w, len),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f * scale),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(
-                        width = if (activeId != null) 2.5f * scale else stroke,
-                        pathEffect = if (predicted && activeId != null) {
-                            PathEffect.dashPathEffect(floatArrayOf(7f * scale, 4f * scale))
-                        } else null
-                    )
-                )
-                drawLine(
-                    PaintColor.copy(alpha = .6f),
-                    Offset(c.x + parallelOffset, c.y - len / 2f + 8f * scale),
-                    Offset(c.x + parallelOffset, c.y + len / 2f - 8f * scale),
-                    strokeWidth = stroke,
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f * scale, 5f * scale))
-                )
-            }
+            )
+            drawLine(
+                PaintColor.copy(alpha = .6f),
+                Offset(c.x + o, c.y - len / 2f + 8f * scale),
+                Offset(c.x + o, c.y + len / 2f - 8f * scale),
+                strokeWidth = stroke,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f * scale, 5f * scale))
+            )
         }
         drawContext.canvas.restore()
 
-        // Runway number tags sit beyond each threshold, just like the HTML SVG.
-        RUNWAYS.forEach { runway ->
-            val th = Math.toRadians(runway.heading)
-            val dx = sin(th)
-            val dy = -cos(th)
-            val px = cos(th)
-            val py = sin(th)
-            val x = c.x - dx.toFloat() * (len / 2f + 20f * scale) + px.toFloat() * tagOffset
-            val y = c.y - dy.toFloat() * (len / 2f + 20f * scale) + py.toFloat() * tagOffset
-
-            textLabel(
-                scope = this,
-                text = runway.id,
-                p = Offset(x, y),
-                on = runway.id == activeId,
-                scale = scale
-            )
+        // One label per runway end (06L, 06R, 24L, 24R), each in line with its lane.
+        val tagDist = len / 2f + 20f * scale
+        listOf(-off, off).forEach { o ->
+            val n06 = name06(o)
+            val n24 = name24(o)
+            val tagLat = o + (if (o > 0) 38f else -38f) * scale   // outside the lane, clear of the arrow
+            textLabel(this, n06, toScreen(tagLat, tagDist), n06 in lanes || "06" in lanes || (predicted && activeId == "06"), scale)
+            textLabel(this, n24, toScreen(tagLat, -tagDist), n24 in lanes || "24" in lanes || (predicted && activeId == "24"), scale)
         }
 
-        // Animated approach arrow. The HTML uses a 10/8 dash pattern with a
-        // 0.9s linear animation of stroke-dashoffset.
-        if (activeId != null) {
-            val runway = RUNWAYS.first { it.id == activeId }
-            val tip = c.y + len / 2f + 10f * scale
-            drawContext.canvas.save()
-            drawContext.canvas.rotate(runway.heading.toFloat(), c.x, c.y)
-            run {
-                val arrowAlpha = if (predicted) .55f else 1f
-                drawLine(
-                    Taxi.copy(alpha = arrowAlpha),
-                    Offset(c.x, 252f * scale),
-                    Offset(c.x, tip + 14f * scale),
-                    strokeWidth = 4.5f * scale,
-                        pathEffect = PathEffect.dashPathEffect(
-                            floatArrayOf(10f * scale, 8f * scale),
-                            if (predicted) 0f else dashPhase * scale
-                        )
-                )
-
-                val head = Path().apply {
-                    moveTo(c.x, tip)
-                    lineTo(c.x - 10f * scale, tip + 17f * scale)
-                    lineTo(c.x + 10f * scale, tip + 17f * scale)
-                    close()
-                }
-                drawPath(head, Taxi.copy(alpha = arrowAlpha))
+        // Approach arrows: one per lane in use, aimed straight down that lane.
+        // Predicted (wind only, lane unknown): a single centred arrow, as before.
+        val arrows: List<Pair<Double, Float>> = when {
+            activeId == null -> emptyList()
+            predicted -> listOf(RUNWAYS.first { it.id == activeId }.heading to 0f)   // centred between the lanes
+            else -> lanes.mapNotNull { lane ->
+                val r = RUNWAYS.firstOrNull { it.id == (if (lane.length == 2) lane else lane.dropLast(1)) } ?: return@mapNotNull null
+                // In the arrow's own frame (rotated by the landing heading), +x is
+                // always to the right of travel, so R is +off and L is -off. The arrow
+                // sits in line with its lane, just before the runway threshold.
+                r.heading to (if (lane.length == 2) 0f else if (lane.last() == 'R') off else -off)   // 0 = lane not known yet, centred
             }
+        }
+        arrows.forEach { (heading, lat) ->
+            val ax = c.x + lat
+            val tail = c.y + len / 2f + 54f * scale
+            val tip = c.y + len / 2f + 6f * scale
+            val arrowAlpha = if (predicted) .55f else 1f
+            drawContext.canvas.save()
+            drawContext.canvas.rotate(heading.toFloat(), c.x, c.y)
+            drawLine(
+                Taxi.copy(alpha = arrowAlpha),
+                Offset(ax, tail),
+                Offset(ax, tip + 14f * scale),
+                strokeWidth = 4.5f * scale,
+                pathEffect = PathEffect.dashPathEffect(
+                    floatArrayOf(10f * scale, 8f * scale),
+                    if (predicted) 0f else dashPhase * scale
+                )
+            )
+            val head = Path().apply {
+                moveTo(ax, tip)
+                lineTo(ax - 10f * scale, tip + 17f * scale)
+                lineTo(ax + 10f * scale, tip + 17f * scale)
+                close()
+            }
+            drawPath(head, Taxi.copy(alpha = arrowAlpha))
             drawContext.canvas.restore()
         }
     }
@@ -648,8 +721,8 @@ private fun textLabel(
 ) {
     val background = if (on) SignBg else Color.Transparent
     val border = if (on) SignFg else Line
-    val w = 40f * scale
-    val h = 28f * scale
+    val w = 38f * scale
+    val h = 24f * scale
 
     scope.drawRoundRect(
         color = background,
@@ -665,20 +738,96 @@ private fun textLabel(
         style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f * scale),
     )
 
-    run {
-        val canvas = scope.drawContext.canvas.nativeCanvas
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (on) android.graphics.Color.rgb(255, 201, 51) else android.graphics.Color.rgb(151, 163, 174)
-            textSize = 18f * scale
-            textAlign = android.graphics.Paint.Align.CENTER
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    val canvas = scope.drawContext.canvas.nativeCanvas
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (on) android.graphics.Color.rgb(255, 201, 51) else android.graphics.Color.rgb(151, 163, 174)
+        textSize = 15f * scale
+        textAlign = android.graphics.Paint.Align.CENTER
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+    canvas.drawText(text, p.x, p.y - (paint.ascent() + paint.descent()) / 2f, paint)
+}
+
+// GLIDESLOPE chart (optional): side view of the 3 degree path with each aircraft as a dot.
+@Composable private fun ApproachProfile(arrivals: List<Aircraft>, lang: String) {
+    val lblKnown = t(lang, "lane_known")
+    val lblRunway = t(lang, "runway_only")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionTitle(t(lang, "profile"))
+        Canvas(Modifier.fillMaxWidth().height(170.dp)) {
+            val padL = 34.dp.toPx(); val padR = 30.dp.toPx(); val padT = 10.dp.toPx(); val padB = 20.dp.toPx()
+            val plotW = size.width - padL - padR
+            val plotH = size.height - padT - padB
+            val xMax = SEARCH_RADIUS_KM.toFloat()   // chart spans the whole search area
+            val yMax = max(5000f, ceil((arrivals.maxOfOrNull { it.altFt } ?: 0).toFloat() / 1000f) * 1000f)
+            val slope = GS_FT_PER_KM.toFloat()
+            val floorFt = (GS_FLOOR_M * 3.28084).toFloat()
+            fun px(km: Float) = padL + (xMax - km.coerceIn(0f, xMax)) / xMax * plotW
+            fun py(ft: Float) = padT + plotH - ft.coerceIn(0f, yMax) / yMax * plotH
+
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 10.sp.toPx(); color = Dim.toArgb()
+            }
+            val nc = drawContext.canvas.nativeCanvas
+            fun text(txt: String, x: Float, y: Float, align: android.graphics.Paint.Align, argb: Int = Dim.toArgb()) {
+                paint.textAlign = align; paint.color = argb
+                nc.drawText(txt, x, y, paint)
+            }
+
+            // grid + ground
+            (1000 until yMax.toInt() step 1000).map { it.toFloat() }.forEach { v ->
+                drawLine(Line.copy(alpha = .5f), Offset(padL, py(v)), Offset(padL + plotW, py(v)), strokeWidth = 1f)
+                text(v.roundToInt().toString(), padL - 4.dp.toPx(), py(v) + 3.dp.toPx(), android.graphics.Paint.Align.RIGHT)
+            }
+            drawLine(Line, Offset(padL, py(0f)), Offset(padL + plotW, py(0f)), strokeWidth = 1.5f)
+            var km = 0
+            while (km <= xMax) {
+                text("$km km", px(km.toFloat()), size.height - 4.dp.toPx(), android.graphics.Paint.Align.CENTER)
+                km += 5
+            }
+
+            // corridor counted as "on final" (0.5x to 2x the 3 degree height)
+            val up = GS_UPPER_FACTOR.toFloat() * slope
+            val lo = GS_LOWER_FACTOR.toFloat() * slope
+            val xHit = yMax / up
+            val band = Path().apply {
+                moveTo(px(0f), py(0f))
+                if (xHit < xMax) { lineTo(px(xHit), py(yMax)); lineTo(px(xMax), py(yMax)) } else lineTo(px(xMax), py(up * xMax))
+                lineTo(px(xMax), py(min(lo * xMax, yMax)))
+                close()
+            }
+            drawPath(band, Taxi.copy(alpha = .10f))
+
+            // the 3 degree glideslope itself
+            val xEnd = min(xMax, yMax / slope)
+            drawLine(Dim, Offset(px(0f), py(0f)), Offset(px(xEnd), py(slope * xEnd)), strokeWidth = 1.5.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 6.dp.toPx())))
+
+            // runway strip at distance 0
+            drawLine(PaintColor.copy(alpha = .8f), Offset(px(0f), py(0f)), Offset(size.width - 4.dp.toPx(), py(0f)), strokeWidth = 4.dp.toPx())
+
+            // lane-decision gate
+            val gx = px(LANE_MAX_KM.toFloat())
+            drawLine(Dim.copy(alpha = .7f), Offset(gx, padT), Offset(gx, py(0f)), strokeWidth = 1.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())))
+            text(lblKnown, gx + 4.dp.toPx(), padT + 10.dp.toPx(), android.graphics.Paint.Align.LEFT)
+            text(lblRunway, gx - 4.dp.toPx(), padT + 10.dp.toPx(), android.graphics.Paint.Align.RIGHT)
+
+            // aircraft, nearest first
+            arrivals.forEachIndexed { i, a ->
+                val d = a.distKm.toFloat()
+                val x = px(d); val y = py(a.altFt.toFloat())
+                val inBand = a.altFt >= lo * d - floorFt && a.altFt <= up * d + floorFt
+                val col = if (inBand) Taxi else Dim
+                if (a.side != null) drawCircle(col, 5.dp.toPx(), Offset(x, y))
+                else drawCircle(col, 5.dp.toPx(), Offset(x, y), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
+                var ly = y - 9.dp.toPx() - (i % 2) * 11.dp.toPx()
+                if (ly < padT + 22.dp.toPx()) ly = y + 18.dp.toPx() + (i % 2) * 11.dp.toPx()
+                val lx = x.coerceIn(padL + 22.dp.toPx(), size.width - 22.dp.toPx())
+                text(a.callsign, lx, ly, android.graphics.Paint.Align.CENTER, PaintColor.toArgb())
+            }
         }
-        canvas.drawText(
-            text,
-            p.x,
-            p.y - (paint.ascent() + paint.descent()) / 2f,
-            paint
-        )
+        Text(t(lang, "profile_note"), color = Dim, fontSize = 12.sp)
     }
 }
 
@@ -687,7 +836,7 @@ private fun textLabel(
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(a.callsign, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                RunwayBadge(a.runway, stacked = true)
+                RunwayBadge(a.runway, stacked = true, side = a.side)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Metric(t(lang,"heading"), "${a.heading}°"); Metric(t(lang,"alt"), nf(a.altFt.toDouble(),0,lang)); Metric(t(lang,"dist"), nf(a.distKm,1,lang)); Metric(t(lang,"speed"), a.speedKt?.toString() ?: "–")
@@ -695,9 +844,9 @@ private fun textLabel(
         }
     }
 }
-@Composable private fun RunwayBadge(r: Runway, highlight: Boolean = false, stacked: Boolean = false) {
+@Composable private fun RunwayBadge(r: Runway, highlight: Boolean = false, stacked: Boolean = false, side: String? = null) {
     val content: @Composable () -> Unit = {
-        Box(Modifier.then(if (highlight) Modifier.border(2.dp, Taxi, RoundedCornerShape(5.dp)) else Modifier).background(SignBg, RoundedCornerShape(5.dp)).padding(horizontal=9.dp,vertical=2.dp)) { Text(r.id,color=SignFg,fontWeight=FontWeight.ExtraBold) }
+        Box(Modifier.then(if (highlight) Modifier.border(2.dp, Taxi, RoundedCornerShape(5.dp)) else Modifier).background(SignBg, RoundedCornerShape(5.dp)).padding(horizontal=9.dp,vertical=2.dp)) { Text(r.id + (side ?: ""),color=SignFg,fontWeight=FontWeight.ExtraBold) }
         Text(r.pair.replace(" ",""),color=if (highlight) Taxi else Dim,fontSize=12.sp)
     }
     if (stacked) Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) { content() }
@@ -749,7 +898,6 @@ private fun textLabel(
             Dropdown(if (s.intervalSec == 120) "2 min" else s.intervalSec.toString()+" s", listOf(15,30,60,120), { if (it == 120) "2 min" else "$it s" }) { vm.setInterval(it) }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) { Text(t(lang,"auto"),color=Dim); Switch(s.autoRefresh, vm::setAuto) }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) { Text(t(lang,"radius"),color=Dim); Dropdown("${s.radiusKm} km", listOf(15,25,35), {"$it km"}) { vm.setRadius(it) } }
         Button(onClick=vm::refresh, enabled=!s.busy, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Panel,contentColor=PaintColor)) { Text(t(lang,"refresh")) }
         if(s.autoRefresh) Text(if(s.busy) t(lang,"updating") else t(lang,"statusNext","s" to max(0,ceil((s.nextAt-System.currentTimeMillis())/1000.0).toInt()).toString()),color=Dim,fontSize=13.sp)
     }
