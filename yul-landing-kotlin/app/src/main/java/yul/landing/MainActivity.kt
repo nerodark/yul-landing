@@ -54,12 +54,12 @@ import kotlin.math.*
 
 private val Asphalt = Color(0xFF1D242C)
 private val Panel = Color(0xFF262F38)
-private val Line = Color(0xFF3A4551)
+internal val Line = Color(0xFF3A4551)
 private val PaintColor = Color(0xFFF3F4EF)
 private val Dim = Color(0xFF97A3AE)
 private val Taxi = Color(0xFFF2B705)
 private val Alert = Color(0xFFEE6A5C)
-private val SignBg = Color(0xFF0D1013)
+internal val SignBg = Color(0xFF0D1013)
 private val SignFg = Color(0xFFFFC933)
 
 data class Runway(val name: String, val id: String, val pair: String, val heading: Double)
@@ -69,7 +69,9 @@ private val RUNWAYS = listOf(
 )
 private const val AIRPORT_LAT = 45.4706
 private const val AIRPORT_LON = -73.7408
-private const val AIRPORT_ELEV_M = 36.0
+// Runway surface height (24R is about 102 ft). The 118 ft airport elevation is the highest
+// point of the field, which made planes near touchdown read slightly below zero.
+private const val AIRPORT_ELEV_M = 31.0
 private const val MAX_AGL_M = 1600.0   // ~5,250 ft: covers level intercepts out to the edge of the search area
 private const val HDG_TOL = 15.0
 private const val CL_TOL = 25.0
@@ -85,6 +87,134 @@ private const val LANE_TOL_KM = 0.4
 // Only call L/R once the plane is this close and this low; farther out it may
 // still be being vectored onto final, so we show just the runway number.
 private const val LANE_MAX_KM = 10.0
+// OpenSky aircraft categories counted as airplanes:
+// 2 = light, 3 = small, 4 = large, 5 = high-vortex large, 6 = heavy, 7 = high performance.
+// (8 = rotorcraft, 9 = glider, 12 = ultralight, 14 = UAV are left out.)
+private val AIRPLANE_CATEGORIES = setOf(2, 3, 4, 5, 6, 7)
+// An aircraft is kept only if it is positively identified as an airplane: its ICAO type is on
+// AIRPLANE_TYPES below, or its transponder reports an airplane category. One that is
+// identified as something else (helicopter, glider...) is dropped. For aircraft with no
+// information at all (lookup failed AND no category): true = keep, false = drop.
+private const val INCLUDE_UNIDENTIFIED = true
+// Airplane type designators: every ICAO Doc 8643 type with class L (landplane), from the
+// Mictronics / tar1090-db type table. Helicopters (H), gyrocopters (G), tiltrotors (T),
+// seaplanes (S) and amphibians (A) are not on it.
+private val AIRPLANE_TYPES: Set<String> = """
+A1 A10 A122 A124 A140 A148 A158 A16 A178 A19 A19N A20 A20N A21 A210 A211 A21N A22 A223 A225 A23 A27 A270
+A29 A3 A306 A30B A31 A310 A318 A319 A320 A321 A33 A332 A333 A337 A338 A339 A342 A343 A345 A346 A35 A359
+A35K A37 A388 A3ST A4 A400 A411 A50 A500 A504 A6 A660 A700 A743 A748 A890 A9 A900 A910 AA1 AA37 AA5 AAT3
+AAT4 AB11 AB15 AB18 AB95 AC11 AC4 AC50 AC52 AC56 AC5A AC68 AC6L AC72 AC80 AC90 AC95 ACAM ACAR ACED ACPL
+ACR2 ACRD ACRO ACSR AD20 ADVE AE45 AEA1 AERK AEST AFOX AG02 AG04 AG10 AG14 AI10 AIGT AIRD AIRL AJ27 AJET
+AK1 AKNC AKRO ALBU ALC1 ALGR ALIG ALIZ ALPI ALSL ALTO AM3 AMX AN12 AN2 AN22 AN24 AN26 AN28 AN3 AN30 AN32
+AN38 AN70 AN72 AN8 ANDR ANGL ANKA ANSN AP20 AP22 AP26 AP28 AP32 AP36 APM2 APM3 APM4 APUP AR11 AR15 AR50
+AR5T AR65 AR6T AR79 ARES ARKS ARON ARV1 ARVA ARWF AS02 AS14 AS16 AS2T AS80 ASDR ASO4 ASO5 ASOX ASTO ASTR
+AT1 AT2P AT3 AT3P AT3T AT43 AT44 AT45 AT46 AT5P AT5T AT6T AT72 AT73 AT75 AT76 AT8T ATAC ATG1 ATIS ATL
+ATLA ATP ATTL AU11 AUJ2 AUJ4 AURA AUS3 AUS4 AUS5 AUS6 AUS7 AUS9 AV68 AVID AVIN AVK4 AXE B1 B14A B14B
+B14C B17 B18T B190 B2 B209 B21 B23 B23E B24 B25 B26 B26M B29 B350 B360 B36T B37M B38M B39M B3XM B461
+B462 B463 B52 B58T B60 B60T B701 B703 B712 B720 B721 B722 B732 B733 B734 B735 B736 B737 B738 B739 B741
+B742 B743 B744 B748 B74R B74S B752 B753 B762 B763 B764 B772 B773 B778 B779 B77L B77W B788 B789 B78X BA11
+BAR6 BARC BASS BBAT BBIR BCA3 BCAT BCMP BCS1 BCS3 BD10 BD12 BD17 BD4 BD5 BD5J BD5T BDOG BE10 BE17 BE18
+BE19 BE20 BE22 BE23 BE24 BE30 BE32 BE33 BE35 BE36 BE40 BE4W BE50 BE55 BE56 BE58 BE60 BE65 BE70 BE76 BE77
+BE80 BE88 BE95 BE99 BE9L BE9T BEA5 BEAR BELF BETA BEVR BF19 BFIT BILO BIPL BIRD BISC BKUT BL11 BL17 BL19
+BL8 BLBU BLCF BLEN BLKS BLSA BM6 BMAN BN2P BN2T BO40 BOBC BOLT BOOM BPAT BPOD BPUM BR14 BR23 BR60 BR61
+BR8 BRAV BREZ BROU BS60 BSTR BSWN BT36 BT7 BTB2 BTB3 BTUB BU20 BU31 BU33 BU81 BUC BULT BUSH BW60 BW6T
+BX2 C02T C04T C06T C07T C08T C1 C101 C10T C119 C120 C123 C125 C130 C135 C140 C141 C14T C15 C150 C152
+C160 C162 C17 C170 C172 C175 C177 C180 C182 C185 C188 C190 C195 C2 C205 C206 C207 C208 C210 C212 C21T
+C22J C240 C25A C25B C25C C25M C270 C27J C295 C303 C306 C309 C30J C310 C311 C320 C335 C336 C337 C340 C365
+C402 C404 C408 C411 C414 C42 C421 C425 C441 C46 C500 C501 C510 C525 C526 C550 C551 C55B C560 C56X C5M
+C650 C680 C68A C700 C72R C750 C77R C82 C82R C82S C82T C919 C97 CA12 CA19 CA1P CA1T CA25 CA3 CA4 CA41 CA6
+CA61 CA65 CA7P CA7T CA8 CA9 CABI CABN CAD2 CAD4 CAJ CAML CAMP CAN4 CAPL CAR CARV CASS CAT1 CAT2 CAW CB1
+CC11 CC19 CDC6 CDW1 CE43 CEGL CEL5 CELR CENT CG3 CH1 CH10 CH15 CH18 CH20 CH25 CH2T CH3 CH30 CH40 CH50
+CH60 CH62 CH64 CH65 CH70 CH75 CH7A CH7B CH80 CHAN CHCS CHGO CHIC CHIN CHIP CHP2 CHR1 CHR4 CICA CJ1 CJ6
+CKUO CL30 CL35 CL41 CL4G CL60 CL8 CLA CLB1 CLBR CLDS CMA3 CMAS CN12 CN35 CNBR CNDR CNGP CNUK CO50 COAR
+COBR COL3 COL4 COLT CONI CORO CORR CORS CORV COUG COUR COY2 COZJ COZY CP10 CP13 CP20 CP21 CP22 CP23 CP30
+CP32 CP60 CP65 CP75 CP80 CP90 CPNA CPUP CR10 CRA1 CRAC CRBN CRER CRES CRJ1 CRJ2 CRJ7 CRJ9 CRJX CRUZ CT4
+CTAH CUB2 CUCA CUDA CULP CULV CULX CVLP CVLT CX5 CYCL CYGT D1 D11 D139 D140 D150 D18 D201 D21 D228 D24
+D25 D250 D253 D28D D28T D31 D328 D39 D4 D5 D5TU D6 D6CR D7 D8 DA2 DA36 DA40 DA42 DA5 DA50 DA62 DAHU DAKH
+DAL1 DAL4 DAL5 DART DC10 DC2 DC3 DC3S DC3T DC4 DC6 DC7 DC85 DC86 DC87 DC91 DC92 DC93 DC94 DC95 DDUC DEFI
+DELF DF10 DF1M DF2 DF3 DFL6 DFLY DG15 DH2T DH3T DH4T DH60 DH80 DH82 DH83 DH84 DH85 DH87 DH88 DH89 DH8A
+DH8B DH8C DH8D DH90 DH94 DHA3 DHC1 DHC2 DHC3 DHC4 DHC5 DHC6 DHC7 DIES DIJ3 DIMO DINO DJET DO27 DO28 DOCX
+DON DOVE DR1 DR10 DR22 DR30 DR40 DRIF DRTG DSA1 DSK DSLK DT45 DTA1 DTA2 DUB2 DUCE DUR5 DV1 DV2 DV20 DW1
+DWD2 E110 E120 E121 E135 E145 E170 E190 E195 E2 E200 E230 E275 E290 E295 E2CB E300 E314 E350 E35L E390
+E3CF E3TF E400 E45X E500 E50P E530 E545 E550 E55P E6 E737 E75L E75S E767 E7BH EA40 EA50 EAEA EAGL EAGX
+EBOY EC6 ECHO EDGE EDGT EF2 EFAN EFOX EFUS EGRT EL20 ELF ELIT ELPS ELSP ELST ELTR EM10 EM11 EP9 EPER
+EPIC EPX1 ERAC ERCO ES13 ESCA ESCP ESQL ETAR EUFI EUPA EURT EV55 EV97 EVAN EVIC EVOP EVOT EVSS EX5T EXNG
+EXPR EZFL EZFT EZHV EZIK EZKC F1 F100 F104 F106 F111 F117 F13 F14 F15 F156 F16 F16X F18H F18S F1FV F2
+F22 F260 F26T F27 F28 F2TH F30 F35 F3F F4 F402 F406 F41E F421 F5 F50 F5SA F60 F600 F7 F70 F8 F86 F8L
+F900 F9F FA01 FA02 FA03 FA04 FA10 FA11 FA20 FA24 FA50 FA62 FA6X FA7X FA8X FAET FALC FALM FANL FANT FB1A
+FB1B FB5 FBA2 FBIR FC1 FD2E FDCT FDF2 FDMC FE51 FEST FFLY FG01 FGT FIBO FIKD FIKE FINC FJ10 FJR3 FK12
+FK14 FK9 FL3 FL53 FL54 FL55 FLAM FLCO FLE2 FLE7 FLIZ FLSH FLSS FM25 FMGO FNKB FOOF FORT FOUG FOX FOXT
+FRBD FREE FRNT FRON FS51 FT30 FU24 FURY FUSI FW19 FW21 FW44 FW90 FX1 G1 G109 G115 G120 G12T G140 G150
+G159 G15T G160 G164 G180 G200 G202 G222 G250 G280 G2GL G2T1 G3 G300 G46 G4SG G59 G64T G70 G800 G850 G91
+G96 G97 GA10 GA20 GA3C GA4C GA5C GA6C GA7 GA7C GA8 GA8C GABR GALX GANT GAUN GAVI GB1 GBSP GC1 GEMI GENI
+GEPE GF20 GFLY GJ11 GL5T GL7T GLAD GLAS GLEX GLF2 GLF3 GLF4 GLF5 GLF6 GLID GLIM GLSP GLST GLTU GM01 GM17
+GMGC GNAT GOLF GOTR GP1 GP4 GPRO GR51 GRAF GRFN GRIF GRIZ GSIS GSPN GUEP GURI GX GY10 GY20 GY30 GY80
+H111 H202 H204 H207 H25A H25B H25C H40 HA31 HA4T HAHU HANS HAR HAWK HB21 HB23 HB3 HCAT HD34 HDJT HEAD
+HERN HF20 HI27 HIGH HIND HL2 HLC4 HLD4 HM38 HN70 HORN HORZ HPZL HR10 HR20 HRM9 HRNT HROC HRON HRYA HT16
+HT2 HT32 HT34 HT36 HT40 HU1 HU2 HUML HUMM HUNT HURI HURK HUSK HYPR I103 I112 I114 I115 I11B I153 I15B
+I16 I22 I23 I3 I66 I828 IA46 IA50 IA51 IA58 IA63 IFUR IL14 IL18 IL28 IL38 IL62 IL76 IL86 IL96 IMPU INCQ
+INEC INEX INTG ION IP06 IP10 IP26 IP6A IPAN IR21 IR22 IR23 IR24 IR25 IR27 IR28 IR31 IR46 IR99 IRBS IS28
+ISAT ISPT J1 J10 J177 J2 J20 J3 J300 J328 J4 J400 J40E J5 J600 J8A J8B JAB2 JAB4 JABI JACE JAGR JAJ5
+JAJ6 JARO JAST JB15 JC01 JC02 JCOM JCRU JD2 JDOE JFOX JH7 JK05 JL9 JN76 JPM1 JPRO JRC1 JS1 JS20 JS3 JS31
+JS32 JS41 JSQA JSX JT2 JU52 JUN1 JUN2 JUNR JUPI K100 K200 K250 K35E K35R K50 K51 K8 K900 KAAN KAFI KAK1
+KAK2 KAK3 KAT3 KATB KATR KC2 KE3 KEHA KELA KELD KERO KEST KF21 KFAB KFAS KFIR KIS2 KIS4 KITH KITI KK60
+KL07 KL10 KL25 KL35 KLBR KM2 KNTW KOLL KP2 KP5 KR1 KR2 KR21 KR30 KR31 KR34 KRAG KRAH KRIC KSTK KT1 KTOO
+KZ2 KZ3 KZ4 KZ7 KZ8 KZLA L10 L101 L11 L11E L12 L13 L13M L13S L14 L15 L159 L18 L181 L188 L200 L29 L29A
+L29B L37 L380 L39 L40 L410 L5 L59 L60 L610 L70 L8 L90 LA60 LA6T LACO LAKR LAKX LANC LAR1 LARK LAST LBUG
+LCA LCB LCR LEG2 LEGD LEOP LESP LEV2 LEV4 LEVI LGEZ LGND LH10 LIBE LION LJ23 LJ24 LJ25 LJ28 LJ31 LJ35
+LJ40 LJ45 LJ55 LJ60 LJ70 LJ75 LJ85 LM5 LM5X LM7 LMC1 LMK1 LN27 LNC2 LNC4 LNCE LNP4 LNT4 LOCA LOVE LP1
+LS2 LSTR LTNG LUL5 LUL6 LUL7 LUL8 LV51 LW20 LW40 LWIN LX32 LX34 LXR LYSA M10 M101 M106 M108 M10R M110
+M15 M17 M18 M18T M1SC M2 M200 M203 M20P M20T M21 M212 M22 M24 M26 M28 M2HK M308 M326 M339 M345 M346 M360
+M36J M4 M404 M5 M55 M6 M600 M7 M700 M7T M8 M9 MA1 MA5 MA60 MA6H MAGC MAGI MAGN MAJR MAKO MAMB MAME MAVR
+MB70 MB80 MC01 MC10 MC23 MC45 MC90 MCOU MCOY MCR1 MCR4 MCRR MCUL MD11 MD3 MD3R MD81 MD82 MD83 MD87 MD88
+MD90 ME08 ME09 ME62 MEAD MEL2 MERK MESS METR MEXP MF10 MF17 MG15 MG17 MG19 MG21 MG23 MG25 MG29 MG31 MG44
+MGAT MGIC MGNM MGUL MH02 MH46 MIDR MIMP MIMU MIR2 MIRA MITE MJ10 MJ12 MJ1H MJ2 MJ3 MJ4 MJ5 MJ51 MJ53
+MJ55 MJ7 MJ77 MJ8 MJ80 MJ9 MJ90 MLER MMAC MMUT MNEX MOCU MOGO MOL1 MON2 MONA MONI MOR2 MOSP MOSQ MOTO
+MP02 MP20 MR25 MR35 MR3T MRAI MRAM MRF1 MRJ7 MRJ9 MRTN MS1 MS18 MS23 MS25 MS30 MS31 MS73 MS76 MSAI MSQ2
+MT2 MU2 MU23 MU30 MUS2 MVN1 MVRK MX10 MX1T MX2 MX58 MX65 MX80 MXS MY12 MY13 MYA4 MYS4 N110 N120 N219
+N250 N260 N262 N3 N320 N340 N3N N5 N5A N5B NAL2 NARN NAVI NC85 ND1T NDAC NDAT NDIC NFEX NG4 NG5 NG5E
+NHCO NI28 NIBB NIPR NM5 NMCU NNJA NOMA NORA NORS NPOR NST6 NSTR NT10 NXT NXTE O1 O3 OCNR OM1 OMAG OMGA
+OMLA ONE ONEX OPCA OSCR OUDE OVOD OZZI P06T P1 P100 P130 P148 P149 P180 P18T P19 P1HH P2 P208 P210 P212
+P220 P230 P250 P25B P27 P270 P28A P28B P28R P28S P28T P28U P3 P32R P32T P337 P38 P39 P40 P46T P47 P4Y
+P50 P51 P57 P60 P61 P63 P66P P66T P68 P68T P70 P750 P8 P80 P82 PA11 PA12 PA14 PA15 PA16 PA17 PA18 PA20
+PA22 PA23 PA24 PA25 PA27 PA30 PA31 PA32 PA34 PA36 PA38 PA44 PA46 PA47 PACE PAGO PANT PAR1 PAR4 PARL PAT2
+PAT4 PAUL PAY1 PAY2 PAY3 PAY4 PC12 PC21 PC24 PC6P PC6T PC7 PC9 PDIG PECR PEGA PEGZ PELI PEMB PETL PGEE
+PGK1 PHNX PIAE PIAT PICO PILL PINO PIPA PISI PIT4 PIVE PIVI PK11 PK15 PK18 PK19 PK21 PK23 PK25 PKAN PL1
+PL12 PL2 PL4 PL9 PLUS PNR2 PNR3 PNR4 PNTH PO2 PO60 POLI PP2 PP3 PPRO PRBP PRBR PRCE PREN PRET PREX PRIM
+PRM1 PROC PROT PROW PRPR PRTS PRXT PSTM PT21 PT22 PT70 PT80 PTMS PTRL PTS1 PTS2 PTSS PUL6 PULR PULS PUP
+PURS PUSH PW4 PZ01 PZ02 PZ04 PZ05 PZ06 PZ12 PZ26 PZ3T PZ4M PZ6T Q01 Q1 Q25 Q28 Q4 Q5 Q58 Q9 QAIL QALT
+QEST QIC2 QR01 QUAS QUIC R100 R109 R11 R12 R135 R185 R200 R300 R721 R722 R90F R90R R90T RA14 RA17 RAID
+RAIL RALL RANG RARO RAV3 RAV5 RAZM RBEL RC70 RCAL RD03 RD20 RDH2 RELI RENE RF10 RF3 RF4 RF47 RF5 RF6 RF9
+RFAL RGNT RISN RJ03 RJ1H RJ70 RJ85 RK5 RLU1 RNGR ROAR RODS ROND ROSE RS12 RS18 RS20 RS21 RTA4 RUBI RV10
+RV12 RV14 RV15 RV3 RV4 RV4T RV6 RV7 RV8 RV9 RVST RW19 RW20 RW22 RW26 RW3 RYSA RYST S05F S05R S1 S10 S108
+S11 S122 S15S S15U S160 S200 S208 S21 S211 S223 S22T S2P S2T S3 S355 S37 S4 S401 S45 S450 S51D S522 S6
+S601 S716 S900 SA02 SA03 SA04 SA05 SA10 SA11 SA2 SA3 SA30 SA37 SA38 SA50 SA6 SA6E SA7 SA70 SA75 SA8T
+SAB2 SABA SABW SACE SACR SAFF SAH1 SAKO SALB SAM SAPH SASH SASP SASY SATA SAVA SAVG SB05 SB20 SB29 SB32
+SB35 SB37 SB39 SB7 SB91 SBD SBLS SBM3 SBOY SBR1 SBR2 SC01 SC7 SCAM SCEP SCOM SCRO SCTR SCUB SCW1 SD2
+SD26 SD4 SDUS SE1 SE5A SE5R SERA SF2 SF23 SF24 SF25 SF28 SF31 SF32 SF34 SF35 SF36 SF50 SG37 SG70 SG92
+SGCD SGEF SGRA SGUP SH33 SH36 SHAC SHAW SHEK SHER SHOE SHOP SHOR SHRA SHRK SHRT SIDE SIGM SILH SIR2 SIRA
+SJ30 SJET SK10 SK70 SKAR SKRA SKYC SKYO SKYR SL1 SL39 SL90 SLCH SLG2 SLG4 SLH4 SLK3 SLK5 SM01 SM19 SM20
+SM60 SM92 SMB2 SNAP SNGY SNOS SNS2 SNS7 SNS9 SOK2 SOKL SOL1 SOL2 SONX SORA SP20 SP33 SP55 SP6E SP7 SP91
+SP95 SPA2 SPAR SPC2 SPDR SPEL SPIR SPIT SPKR SPOR SPR2 SPRT SPST SPUP SQ2T SQES SR01 SR20 SR22 SRAC SRAI
+SRAS SS2 SS2P SS2T SSAB SSTL ST1 ST10 ST3 ST30 ST4 ST50 ST6 ST60 ST75 ST87 STAL STAR STAT STCH STFF STG2
+STIL STLN STOR STRA STRE STRI STRK STRM STST SU17 SU24 SU25 SU26 SU27 SU29 SU31 SU38 SU57 SU7 SU80 SU95
+SUBA SUNB SUNV SURU SUSO SV4 SVNH SW18 SW2 SW3 SW4 SWAK SWAT SWFT SWIF SWIN SWOR SX30 SYMP SYNC SZ45
+SZ9M T1 T10 T101 T134 T154 T160 T18 T19 T2 T204 T206 T210 T211 T22M T250 T28 T30 T33 T334 T34P T34T T35
+T37 T38 T4 T40 T411 T415 T419 T5 T50 T51 T5YY T6 T7 TA15 TA20 TAA1 TAGO TAIL TAMP TARO TARR TAYA TAYB
+TAYD TB05 TB20 TB21 TB30 TB31 TBM TBM7 TBM8 TBM9 TBR3 TC2 TCAT TCOU TD1 TD2 TD3 TERM TERR TEX2 TEXA TF19
+TF21 TF22 TFOC TFUN TGRS TIAD TIJU TIPB TJET TL20 TL30 TLEG TM5 TMOT TMUS TNAV TNDR TOBA TOOT TOR TOUR
+TOXO TP40 TPIL TPIN TR20 TR26 TR55 TRAL TRAP TRBA TRDO TRF1 TRIM TRIS TRMA TRWN TS11 TS1J TS8 TSPT TSTN
+TT62 TTRS TTWO TU16 TU22 TU95 TUCA TUCR TUCT TUL3 TUTR TVL4 TVLB TWEN TWIR TWSP TWST TZRV U15 U2 U21 U22
+UBAT UF10 UF13 UL10 UL20 UL2F UL39 UL45 ULAC ULPA ULTR UNIV URRA UT60 UT65 UT66 UT75 UU12 V1 V10 V221
+V252 V322 V351 V452 V8SP VALI VAMP VANT VAUT VELO VELT VEZE VF2 VF35 VF60 VG3T VGUL VIMA VIMY VIPJ VIPR
+VISI VIX VIXN VK3P VK3T VL3 VL3T VLOT VLTT VM1 VMT VNOM VNTR VO10 VOL2 VP2 VR20 VR7 VSON VTOR VTRA VTUR
+VUT1 VVIG VW10 VWIT W11 W135 W201 W5BC W62T WA40 WA41 WA42 WA50 WA80 WAC9 WACA WACC WACD WACE WACF WACG
+WACM WACN WACO WACT WAIX WB57 WBOO WCAT WDEX WF4U WFOC WFUR WH1 WH4 WHAT WHIL WHIS WHIT WHK2 WHKN WICH
+WILT WIND WINE WIRR WISP WLBY WM2 WOPU WP40 WP47 WS22 WSP WT10 WT9 WW1 WW23 WW24 WX35 WZER X29 X32 X4
+X47B X55 X59 XA41 XA42 XA85 XAIR XB1 XL2 XNOS Y11 Y112 Y12 Y12F Y130 Y141 Y18T Y20 YA1 YAK3 YAK9 YALE
+YARR YAST YC12 YK11 YK12 YK18 YK28 YK30 YK38 YK40 YK42 YK50 YK52 YK53 YK54 YK55 YK58 YL15 YS11 YUKN YUNO
+YURO Z22 Z26 Z37P Z37T Z42 Z43 Z50 ZEP2 ZEPH ZERO ZIA ZIU ZULU
+""".trim().split(Regex("\\s+")).toSet() + setOf("E175", "DA20", "M20", "Z37")
 // Fixed search area. Planes are usually level around 3,000-5,000 ft when they join the
 // approach 20-25 km out, so this reaches the start of final.
 private const val SEARCH_RADIUS_KM = 25
@@ -99,8 +229,13 @@ private const val GS_FLOOR_M = 100.0          // slack so planes near the runway
 data class Aircraft(
     val callsign: String, val runway: Runway, val heading: Int,
     val altFt: Int, val distKm: Double, val speedKt: Int?,
-    val side: String? // "L" or "R"; null while too far out / too high to tell
+    val side: String?, // "L" or "R"; null while too far out / too high to tell
+    val category: Int, // OpenSky aircraft category; 0 or 1 = not reported
+    val icao24: String = "",
+    val typeCode: String? = null, // ICAO type designator from adsbdb, e.g. "B738"
+    val maker: String? = null     // manufacturer from adsbdb, e.g. "Boeing"
 )
+private data class TypeInfo(val code: String, val maker: String?)
 data class Metar(val dir: Int?, val speed: Int?, val raw: String, val obsMs: Long?)
 data class ForecastRow(
     val date: String, val clock: String, val isNow: Boolean, val code: Int,
@@ -127,10 +262,10 @@ data class UiState(
 )
 
 private class YulRepository {
-    private fun get(url: String): String = HttpURLConnection::class.java.let {
+    private fun get(url: String, connectMs: Int = 15_000, readMs: Int = 20_000): String = HttpURLConnection::class.java.let {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 15_000
-        c.readTimeout = 20_000
+        c.connectTimeout = connectMs
+        c.readTimeout = readMs
         c.requestMethod = "GET"
         c.setRequestProperty("Cache-Control", "no-cache")
         try {
@@ -148,7 +283,8 @@ private class YulRepository {
                 "lamin=${"%.4f".format(Locale.US, AIRPORT_LAT - dLat)}&" +
                 "lamax=${"%.4f".format(Locale.US, AIRPORT_LAT + dLat)}&" +
                 "lomin=${"%.4f".format(Locale.US, AIRPORT_LON - dLon)}&" +
-                "lomax=${"%.4f".format(Locale.US, AIRPORT_LON + dLon)}"
+                "lomax=${"%.4f".format(Locale.US, AIRPORT_LON + dLon)}&" +
+                "extended=1"   // adds the aircraft category (index 17) to each state
         val root = JSONObject(get(url))
         val states = root.optJSONArray("states") ?: JSONArray()
         val out = mutableListOf<Aircraft>()
@@ -158,6 +294,11 @@ private class YulRepository {
             val lat = s.optDoubleOrNull(6) ?: continue
             val track = s.optDoubleOrNull(10) ?: continue
             if (s.optBoolean(8, false)) continue
+            // Airplanes only. If the response has no category field at all, don't filter,
+            // so a wrong field position can never hide every aircraft.
+            val hasCategory = s.length() > 17
+            val category = if (hasCategory && !s.isNull(17)) s.optInt(17) else 0
+            if (hasCategory && category > 1 && category !in AIRPLANE_CATEGORIES) continue   // transponder says not an airplane
             val alt = s.optDoubleOrNull(13) ?: s.optDoubleOrNull(7) ?: continue
             val agl = alt - AIRPORT_ELEV_M
             if (agl > MAX_AGL_M) continue
@@ -180,10 +321,45 @@ private class YulRepository {
             val established = abs(abs(xt) - LANE_HALF_SPACING_KM) <= LANE_TOL_KM
             val side = if (dist > LANE_MAX_KM || agl > LANE_MAX_AGL_M || !established) null
             else if (xt >= 0) "R" else "L"
-            out += Aircraft(call, rwy, track.roundToInt(), (agl * 3.28084).roundToInt(), dist,
-                s.optDoubleOrNull(9)?.let { (it * 1.94384).roundToInt() }, side)
+            out += Aircraft(call, rwy, track.roundToInt(), (agl * 3.28084).roundToInt().coerceAtLeast(0), dist,
+                s.optDoubleOrNull(9)?.let { (it * 1.94384).roundToInt() }, side, category, s.optString(0))
         }
-        out.sortedBy { it.distKm }
+        out.sortedBy { it.distKm }.map { a ->
+            val info = lookupType(a.icao24)
+            if (info == null) a else a.copy(typeCode = info.code, maker = info.maker)
+        }.filter { isPlane(it) }
+    }
+
+    // Include-list decision. Positive identification as a plane wins; a known type that is not
+    // on the list (or a non-plane category) is dropped; no information at all follows the flag.
+    private fun isPlane(a: Aircraft): Boolean {
+        val byType = a.typeCode?.let { it in AIRPLANE_TYPES }   // null = type not known
+        return when {
+            byType == true -> true
+            a.category in AIRPLANE_CATEGORIES -> true
+            byType == false -> false
+            else -> INCLUDE_UNIDENTIFIED
+        }
+    }
+
+    // Aircraft type from the free adsbdb.com database, cached per aircraft (types don't change).
+    // Misses and errors are remembered for 10 minutes so a failing lookup can't slow every refresh.
+    private val typeCache = HashMap<String, Pair<TypeInfo?, Long>>()
+    private fun lookupType(icao24: String): TypeInfo? {
+        if (icao24.isBlank()) return null
+        val now = System.currentTimeMillis()
+        synchronized(typeCache) {
+            typeCache[icao24]?.let { (info, expiry) -> if (now < expiry) return info }
+        }
+        val info = runCatching {
+            JSONObject(get("https://api.adsbdb.com/v0/aircraft/$icao24", 4_000, 4_000))
+                .optJSONObject("response")?.optJSONObject("aircraft")?.let { o ->
+                    val code = o.optString("icao_type").trim()
+                    if (code.isEmpty()) null else TypeInfo(code, o.optString("manufacturer").trim().ifEmpty { null })
+                }
+        }.getOrNull()
+        synchronized(typeCache) { typeCache[icao24] = info to (now + if (info != null) 24 * 3_600_000L else 600_000L) }
+        return info
     }
 
     suspend fun metar(): Metar? = withContext(Dispatchers.IO) {
@@ -311,7 +487,9 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "forecast" to "Airport forecast, next 12 hours", "waiting" to "Waiting for first update", "checking" to "Checking",
         "updated" to "Updated {time} (Montréal time)",
         "unavailable" to "Unavailable", "no_arrivals" to "No arrivals", "in_use" to "Runway in use", "favours" to "Wind favours",
-        "lane_pending" to "Lane pending", "undetermined" to "Not determined", "profile" to "Approach profile", "lane_known" to "Lane known", "runway_only" to "Runway only",
+        "lane_pending" to "Lane pending", "undetermined" to "Not determined",
+        "cat_light" to "Light", "cat_small" to "Small", "cat_large" to "Large", "cat_large_vortex" to "Large (high wake)", "cat_heavy" to "Heavy",
+        "cat_high_perf" to "High performance", "cat_rotor" to "Rotorcraft", "cat_glider" to "Glider", "cat_unknown" to "Category unknown", "profile" to "Approach profile", "lane_known" to "Lane known", "runway_only" to "Runway only",
         "profile_note" to "Distance in km, height in ft (heights exaggerated). Dashed line: 3° glideslope; shaded band: range counted as on final. Filled dot: lane known; ring: runway only.",
         "note_none_wind" to "No aircraft on final right now. The wind favours runway {id}, which would mean landing toward the {dir}.",
         "note_none" to "No aircraft on final right now. This can be a quiet spell or a gap in ADS-B coverage.",
@@ -346,7 +524,9 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "waiting" to "En attente de la première mise à jour", "checking" to "Vérification",
         "updated" to "Mis à jour à {time} (heure de Montréal)",
         "unavailable" to "Indisponible", "no_arrivals" to "Aucune arrivée", "in_use" to "Piste en service", "favours" to "Vent favorable",
-        "lane_pending" to "Côté à confirmer", "undetermined" to "Indéterminée", "profile" to "Profil d'approche", "lane_known" to "Côté connu", "runway_only" to "Piste seulement",
+        "lane_pending" to "Côté à confirmer", "undetermined" to "Indéterminée",
+        "cat_light" to "Léger", "cat_small" to "Petit", "cat_large" to "Grand", "cat_large_vortex" to "Grand (fort sillage)", "cat_heavy" to "Lourd",
+        "cat_high_perf" to "Haute performance", "cat_rotor" to "Giravion", "cat_glider" to "Planeur", "cat_unknown" to "Catégorie inconnue", "profile" to "Profil d'approche", "lane_known" to "Côté connu", "runway_only" to "Piste seulement",
         "profile_note" to "Distance en km, hauteur en ft (hauteurs exagérées). Ligne pointillée : pente de 3°; zone ombrée : plage comptée comme en finale. Point plein : côté connu; anneau : piste seulement.",
         "note_none_wind" to "Aucun avion en finale pour le moment. Le vent favorise la piste {id}, ce qui signifierait un atterrissage vers le {dir}.",
         "note_none" to "Aucun avion en finale pour le moment. Il peut s'agir d'une période calme ou d'une lacune de couverture ADS-B.",
@@ -831,11 +1011,24 @@ private fun textLabel(
     }
 }
 
+private fun categoryLabel(lang: String, c: Int) = t(lang, when (c) {
+    2 -> "cat_light"; 3 -> "cat_small"; 4 -> "cat_large"; 5 -> "cat_large_vortex"; 6 -> "cat_heavy"
+    7 -> "cat_high_perf"; 8 -> "cat_rotor"; 9 -> "cat_glider"; else -> "cat_unknown"
+})
+
+// Aircraft photos are bundled drawables: see AircraftPhotos.kt.
+
 @Composable private fun AircraftCard(a: Aircraft, lang: String) {
     Card(colors = CardDefaults.cardColors(containerColor = Panel), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(a.callsign, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                AircraftPhoto(a.typeCode, a.category)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(a.callsign, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    val typeLine = listOfNotNull(a.typeCode, a.maker).joinToString(" · ")
+                    Text(typeLine.ifEmpty { categoryLabel(lang, a.category) }, color = Dim, fontSize = 12.sp)
+                }
                 RunwayBadge(a.runway, stacked = true, side = a.side)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

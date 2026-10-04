@@ -1,5 +1,0 @@
-﻿<Project>
-  <PropertyGroup>
-    <DefaultItemExcludes>$(DefaultItemExcludes);tools\**;</DefaultItemExcludes>
-  </PropertyGroup>
-</Project>
