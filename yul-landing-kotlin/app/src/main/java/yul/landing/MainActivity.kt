@@ -27,6 +27,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
@@ -495,7 +496,7 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "note_none" to "No aircraft on final right now. This can be a quiet spell or a gap in ADS-B coverage.",
         "note_mixed" to "Mixed runway usage: {list}.",
         "note_switch" to "The wind currently favours runway {id}, so traffic may switch soon.",
-        "loading" to "Loading.", "noneDetected" to "No aircraft detected on final approach.",
+        "loading" to "Loading...", "noneDetected" to "No aircraft detected on final approach.",
         "trafficUnavailable" to "Live traffic is unavailable right now.",
         "windUnavailable" to "Wind is unavailable right now.", "noMetar" to "No METAR reported.",
         "wind_fav" to "From {dir}° at {spd} kt, which favours runway {rwy}.",
@@ -511,7 +512,7 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "now" to "Now", "lightWind" to "Light wind",
         "heading" to "Heading", "alt" to "Alt (ft)", "dist" to "Dist (km)", "speed" to "Speed (kt)", "gusts" to "gusts",
         "refresh" to "Refresh now", "auto" to "Auto-refresh", "radius" to "Search radius", "refreshEvery" to "Refresh every",
-        "statusNext" to "Next update in {s} s", "updating" to "Updating…",
+        "statusNext" to "Next update in {s} s", "updating" to "Updating...",
         "err_network" to "Could not reach OpenSky. Check your connection; if you have refreshed a lot, the daily limit may be used up.",
         "err_rate" to "OpenSky rate limit reached. Choose a longer refresh interval and try again later.",
         "err_generic" to "The live traffic request failed.",
@@ -532,7 +533,7 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "note_none" to "Aucun avion en finale pour le moment. Il peut s'agir d'une période calme ou d'une lacune de couverture ADS-B.",
         "note_mixed" to "Utilisation mixte des pistes : {list}.",
         "note_switch" to "Le vent favorise actuellement la piste {id} : la circulation pourrait bientôt changer de piste.",
-        "loading" to "Chargement…", "noneDetected" to "Aucun avion détecté en approche finale.",
+        "loading" to "Chargement...", "noneDetected" to "Aucun avion détecté en approche finale.",
         "trafficUnavailable" to "Le trafic en direct est indisponible pour le moment.",
         "windUnavailable" to "Le vent est indisponible pour le moment.", "noMetar" to "Aucun METAR disponible.",
         "wind_fav" to "Vent du {dir}° à {spd} kt, ce qui favorise la piste {rwy}.",
@@ -548,7 +549,7 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "now" to "Actuel", "lightWind" to "Vent faible",
         "heading" to "Cap", "alt" to "Alt. (ft)", "dist" to "Dist. (km)", "speed" to "Vit. (kt)", "gusts" to "rafales",
         "refresh" to "Actualiser maintenant", "auto" to "Auto-actualisation", "radius" to "Rayon de recherche", "refreshEvery" to "Actualiser toutes les",
-        "statusNext" to "Prochaine mise à jour dans {s} s", "updating" to "Mise à jour…",
+        "statusNext" to "Prochaine mise à jour dans {s} s", "updating" to "Mise à jour...",
         "err_network" to "Impossible de joindre OpenSky. Vérifiez votre connexion; si vous avez beaucoup actualisé, la limite quotidienne est peut-être atteinte.",
         "err_rate" to "Limite de requêtes OpenSky atteinte. Choisissez un intervalle d'actualisation plus long et réessayez plus tard.",
         "err_generic" to "La requête de trafic en direct a échoué.",
@@ -641,29 +642,54 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 18.dp, 16.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                 item {
                     Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.weight(1f)) {
+                        Column {
                             Text("Montréal-Trudeau (YUL)", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                             Text(t(lang, "sub"), color = Dim, fontSize = 14.sp)
                         }
+                        if (wide) {
+                            Spacer(Modifier.width(12.dp))
+                            UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
+                            Spacer(Modifier.width(12.dp))
+                        }
+                        Spacer(Modifier.weight(1f))
                         Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, Line)) {
                             LanguageButton("EN", lang == "en") { vm.setLang("en") }
                             LanguageButton("FR", lang == "fr") { vm.setLang("fr") }
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
-                    UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
+                    if (!wide) {
+                        Spacer(Modifier.height(10.dp))
+                        UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
+                    }
                     Spacer(Modifier.height(14.dp))
                     if (s.trafficError != null) {
                         Notice(t(lang, if (s.trafficError == "rate") "err_rate" else "err_network"))
                         Spacer(Modifier.height(14.dp))
                     }
-                    Hero(s, lang)
                 }
-                item { ApproachProfile(s.arrivals.orEmpty(), lang) }
-                item { SectionTitle(t(lang, "arrivals")) }
-                if (s.arrivals == null || s.trafficError != null) item { EmptyText(if (s.trafficError != null) t(lang, "trafficUnavailable") else t(lang, "loading")) }
-                else if (s.arrivals.isEmpty()) item { EmptyText(t(lang, "noneDetected")) }
-                else items(s.arrivals, key = { it.callsign + it.distKm }) { AircraftCard(it, lang) }
+                if (wide) {
+                    item {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+                                Hero(s, lang, diagramMax = 195.dp, diagramFixed = true)
+                                ApproachProfile(s.arrivals.orEmpty(), lang)
+                            }
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                SectionTitle(t(lang, "arrivals"))
+                                if (s.arrivals == null || s.trafficError != null) EmptyText(if (s.trafficError != null) t(lang, "trafficUnavailable") else t(lang, "loading"))
+                                else if (s.arrivals.isEmpty()) EmptyText(t(lang, "noneDetected"))
+                                else s.arrivals.forEach { a -> AircraftCard(a, lang) }
+                            }
+                        }
+                    }
+                } else {
+                    item { Hero(s, lang) }
+                    item { ApproachProfile(s.arrivals.orEmpty(), lang) }
+                    item { SectionTitle(t(lang, "arrivals")) }
+                    if (s.arrivals == null || s.trafficError != null) item { EmptyText(if (s.trafficError != null) t(lang, "trafficUnavailable") else t(lang, "loading")) }
+                    else if (s.arrivals.isEmpty()) item { EmptyText(t(lang, "noneDetected")) }
+                    else items(s.arrivals, key = { it.callsign + it.distKm }) { AircraftCard(it, lang) }
+                }
                 item { SectionTitle(t(lang, "wind")) }
                 item { WindCard(s, lang) }
                 item { SectionTitle(t(lang, "forecast")) }
@@ -714,7 +740,7 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
 @Composable private fun SectionTitle(text: String) { Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
 @Composable private fun EmptyText(text: String) { Text(text, color = Dim, modifier = Modifier.padding(vertical = 2.dp)) }
 
-@Composable private fun Hero(s: UiState, lang: String) {
+@Composable private fun Hero(s: UiState, lang: String, modifier: Modifier = Modifier, diagramMax: Dp = 300.dp, diagramFixed: Boolean = false) {
     val fav = s.metar?.let { favouredRunway(it.dir?.toDouble(), it.speed?.toDouble()) }
     val top = s.arrivals?.groupingBy { it.runway.id }?.eachCount()?.maxByOrNull { it.value }?.key?.let { id -> RUNWAYS.firstOrNull { it.id == id } }
     val active = top ?: fav
@@ -731,7 +757,7 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
         s.arrivals.isEmpty() -> t(lang, "no_arrivals")
         else -> directionWord(lang, top!!.heading)
     }
-    Column(Modifier.fillMaxWidth()) {
+    Column(modifier.fillMaxWidth()) {
         Text(t(lang, "landing"), color = Dim, fontSize = 14.sp)
         Text(dir, color = if (s.arrivals.isNullOrEmpty()) Dim else PaintColor, fontSize = if (dir.length > 9) 46.sp else 64.sp, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -740,10 +766,8 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
                 active?.id,
                 predicted,
                 lanes.toSet(),
-                Modifier
-                    .weight(1f)
-                    .aspectRatio(1f)
-                    .sizeIn(maxWidth = 300.dp, maxHeight = 300.dp)
+                if (diagramFixed) Modifier.size(diagramMax)
+                else Modifier.weight(1f).aspectRatio(1f).sizeIn(maxWidth = diagramMax, maxHeight = diagramMax)
             )
         }
         val note = when {
@@ -929,10 +953,10 @@ private fun textLabel(
 }
 
 // GLIDESLOPE chart (optional): side view of the 3 degree path with each aircraft as a dot.
-@Composable private fun ApproachProfile(arrivals: List<Aircraft>, lang: String) {
+@Composable private fun ApproachProfile(arrivals: List<Aircraft>, lang: String, modifier: Modifier = Modifier) {
     val lblKnown = t(lang, "lane_known")
     val lblRunway = t(lang, "runway_only")
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionTitle(t(lang, "profile"))
         Canvas(Modifier.fillMaxWidth().height(170.dp)) {
             val padL = 34.dp.toPx(); val padR = 30.dp.toPx(); val padT = 10.dp.toPx(); val padB = 20.dp.toPx()
@@ -1018,8 +1042,8 @@ private fun categoryLabel(lang: String, c: Int) = t(lang, when (c) {
 
 // Aircraft photos are bundled drawables: see AircraftPhotos.kt.
 
-@Composable private fun AircraftCard(a: Aircraft, lang: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = Panel), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
+@Composable private fun AircraftCard(a: Aircraft, lang: String, modifier: Modifier = Modifier) {
+    Card(modifier, colors = CardDefaults.cardColors(containerColor = Panel), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 AircraftPhoto(a.typeCode, a.category)
@@ -1087,11 +1111,11 @@ private fun categoryLabel(lang: String, c: Int) = t(lang, when (c) {
     Column(verticalArrangement=Arrangement.spacedBy(12.dp), modifier=Modifier.fillMaxWidth()) {
         HorizontalDivider(color=Line)
         Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(10.dp), verticalAlignment=Alignment.CenterVertically) {
-            Text(t(lang,"refreshEvery"), color=Dim, modifier=Modifier.weight(1f))
+            Text(t(lang,"refreshEvery"), color=Dim)
             Dropdown(if (s.intervalSec == 120) "2 min" else s.intervalSec.toString()+" s", listOf(15,30,60,120), { if (it == 120) "2 min" else "$it s" }) { vm.setInterval(it) }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) { Text(t(lang,"auto"),color=Dim); Switch(s.autoRefresh, vm::setAuto) }
-        Button(onClick=vm::refresh, enabled=!s.busy, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Panel,contentColor=PaintColor)) { Text(t(lang,"refresh")) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(10.dp), verticalAlignment=Alignment.CenterVertically) { Text(t(lang,"auto"),color=Dim); Switch(s.autoRefresh, vm::setAuto) }
+        Button(onClick=vm::refresh, enabled=!s.busy, modifier=Modifier, colors=ButtonDefaults.buttonColors(containerColor=Panel,contentColor=PaintColor)) { Text(t(lang,"refresh")) }
         if(s.autoRefresh) Text(if(s.busy) t(lang,"updating") else t(lang,"statusNext","s" to max(0,ceil((s.nextAt-System.currentTimeMillis())/1000.0).toInt()).toString()),color=Dim,fontSize=13.sp)
     }
 }
