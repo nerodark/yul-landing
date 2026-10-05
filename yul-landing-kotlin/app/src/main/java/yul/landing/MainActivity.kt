@@ -650,16 +650,15 @@ private fun YulScreen(s: UiState, vm: YulViewModel) {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 18.dp, 16.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                 item {
                     Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
-                        Column {
+                        Column(modifier = if (wide) Modifier else Modifier.weight(1f)) {
                             Text("Montréal-Trudeau (YUL)", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                             Text(t(lang, "sub"), color = Dim, fontSize = 14.sp)
+                            if (wide) {
+                                Spacer(Modifier.height(8.dp))
+                                UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
+                            }
                         }
-                        if (wide) {
-                            Spacer(Modifier.width(12.dp))
-                            UpdatedStamp(if (s.updated != null) t(lang, "updated", "time" to fmtTime(s.updated, true, lang)) else t(lang, "waiting"), s.updated != null)
-                            Spacer(Modifier.width(12.dp))
-                        }
-                        Spacer(Modifier.weight(1f))
+                        if (wide) Spacer(Modifier.weight(1f))
                         Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, Line)) {
                             LanguageButton("EN", lang == "en") { vm.setLang("en") }
                             LanguageButton("FR", lang == "fr") { vm.setLang("fr") }
