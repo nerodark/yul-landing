@@ -522,7 +522,7 @@ private fun t(lang: String, key: String, vararg p: Pair<String, String>): String
         "sub" to "Piste en service, déduite des avions en finale en temps réel", "landing" to "Direction d'atterrissage",
         "arrivals" to "Avions en finale", "wind" to "Vent à l'aéroport (observation CYUL)", "forecast" to "Prévisions à l'aéroport, 12 prochaines heures",
         "waiting" to "En attente de la première mise à jour", "checking" to "Vérification",
-        "updated" to "Mis à jour à {time} (heure de Montréal)",
+        "updated" to "Mis à jour {time} (heure de Montréal)",
         "unavailable" to "Indisponible", "no_arrivals" to "Aucune arrivée", "in_use" to "Piste en service", "favours" to "Vent favorable",
         "lane_pending" to "Côté à confirmer", "undetermined" to "Indéterminée",
         "cat_light" to "Léger", "cat_small" to "Petit", "cat_large" to "Grand", "cat_large_vortex" to "Grand (fort sillage)", "cat_heavy" to "Lourd",
@@ -566,7 +566,7 @@ private fun directionWord(lang: String, deg: Double): String {
 private fun fmtTime(ms: Long?, seconds: Boolean = false, lang: String = "en"): String {
     if (ms == null) return ""
     val loc = if (lang == "fr") Locale.CANADA_FRENCH else Locale.CANADA
-    val f = if (seconds) DateTimeFormatter.ofPattern("HH:mm:ss z", loc) else DateTimeFormatter.ofPattern("HH:mm z", loc)
+    val f = if (seconds) DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss z", loc) else DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm z", loc)
     return f.format(Instant.ofEpochMilli(ms).atZone(ZoneId.of("America/Toronto")))
 }
 private fun pad3(d: Double?) = d?.roundToInt()?.toString()?.padStart(3, '0') ?: "–"

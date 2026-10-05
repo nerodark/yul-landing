@@ -276,7 +276,7 @@ internal fun AircraftPhoto(typeCode: String?, category: Int) {
             painter = painterResource(res),
             contentDescription = "Aircraft photo",
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
+            contentScale = ContentScale.FillBounds
         )
     }
 }
