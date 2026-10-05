@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.animation.core.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -636,6 +637,13 @@ private fun YulApp(vm: YulViewModel = androidx.lifecycle.viewmodel.compose.viewM
 private fun YulScreen(s: UiState, vm: YulViewModel) {
     val lang = s.lang
     val listState = rememberLazyListState()
+    val activity = LocalView.current.context as? android.app.Activity
+    DisposableEffect(s.autoRefresh, activity) {
+        val window = activity?.window
+        if (s.autoRefresh) window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
     BoxWithConstraints {
         val wide = maxWidth >= 600.dp
         PullToRefreshBox(isRefreshing = s.busy, modifier = Modifier.fillMaxSize(), onRefresh = { vm.refresh() }) {
